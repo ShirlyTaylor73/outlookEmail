@@ -467,6 +467,10 @@ def get_duckmail_token_for_email(email_addr: str) -> Optional[str]:
 
 # ==================== 临时邮箱数据库操作 ====================
 
+SHARE_EXPIRY_OPTIONS_MS = {3600000, 86400000, 259200000, 2592000000, 0}
+DEFAULT_SHARE_EXPIRY_MS = 2592000000
+SHARE_TOKEN_RETRY_LIMIT = 5
+
 def get_temp_email_group_id() -> int:
     """获取临时邮箱分组的 ID"""
     db = get_db()
@@ -584,12 +588,94 @@ def delete_temp_email(email_addr: str) -> bool:
     """删除临时邮箱及其所有邮件"""
     db = get_db()
     try:
+        cursor = db.execute('SELECT id FROM temp_emails WHERE email = ?', (email_addr,))
+        row = cursor.fetchone()
+        if row:
+            db.execute('DELETE FROM temp_email_shares WHERE temp_email_id = ?', (row['id'],))
         db.execute('DELETE FROM temp_email_messages WHERE email_address = ?', (email_addr,))
         db.execute('DELETE FROM temp_emails WHERE email = ?', (email_addr,))
         db.commit()
         return True
     except Exception:
         return False
+
+
+def normalize_share_expires_in(value: Any) -> tuple[Optional[int], Optional[str]]:
+    """校验分享链接有效期，返回毫秒数或错误消息。"""
+    if value is None:
+        return DEFAULT_SHARE_EXPIRY_MS, None
+    if isinstance(value, bool):
+        return None, '有效期参数无效'
+    if isinstance(value, int):
+        expires_in = value
+    elif isinstance(value, str):
+        normalized = value.strip()
+        if not normalized or not normalized.lstrip('-').isdigit():
+            return None, '有效期参数无效'
+        expires_in = int(value)
+    else:
+        return None, '有效期参数无效'
+    if expires_in not in SHARE_EXPIRY_OPTIONS_MS:
+        return None, '不支持的有效期'
+    return expires_in, None
+
+
+def serialize_temp_email_share(row) -> Dict[str, Any]:
+    item = dict(row)
+    return {
+        'id': item.get('id'),
+        'temp_email_id': item.get('temp_email_id'),
+        'token': item.get('token'),
+        'created_at': item.get('created_at'),
+        'expires_at': item.get('expires_at'),
+    }
+
+
+def list_temp_email_shares(temp_email_id: int) -> List[Dict[str, Any]]:
+    db = get_db()
+    cursor = db.execute('''
+        SELECT *
+        FROM temp_email_shares
+        WHERE temp_email_id = ?
+        ORDER BY created_at DESC, id DESC
+    ''', (temp_email_id,))
+    return [serialize_temp_email_share(row) for row in cursor.fetchall()]
+
+
+def create_temp_email_share(temp_email_id: int, expires_in: int) -> Optional[Dict[str, Any]]:
+    db = get_db()
+    expires_at = None
+    if expires_in != 0:
+        expires_at_dt = datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(milliseconds=expires_in)
+        expires_at = expires_at_dt.strftime('%Y-%m-%dT%H:%M:%SZ')
+
+    for _ in range(SHARE_TOKEN_RETRY_LIMIT):
+        token = secrets.token_urlsafe(24)
+        try:
+            cursor = db.execute('''
+                INSERT INTO temp_email_shares (temp_email_id, token, expires_at)
+                VALUES (?, ?, ?)
+            ''', (temp_email_id, token, expires_at))
+            db.commit()
+            row = db.execute(
+                'SELECT * FROM temp_email_shares WHERE id = ?',
+                (cursor.lastrowid,)
+            ).fetchone()
+            return serialize_temp_email_share(row) if row else None
+        except sqlite3.IntegrityError:
+            db.rollback()
+            continue
+    return None
+
+
+def delete_temp_email_share(temp_email_id: int, share_id: int) -> bool:
+    db = get_db()
+    cursor = db.execute(
+        'DELETE FROM temp_email_shares WHERE temp_email_id = ? AND id = ?',
+        (temp_email_id, share_id)
+    )
+    db.commit()
+    return cursor.rowcount > 0
 
 
 def cleanup_temp_email_provider_resource(temp_email: Optional[Dict]) -> None:
@@ -683,6 +769,47 @@ def api_get_temp_emails():
     """获取所有临时邮箱"""
     emails = load_temp_emails()
     return jsonify({'success': True, 'emails': emails})
+
+
+@app.route('/api/temp-emails/<int:temp_email_id>/shares', methods=['GET'])
+@login_required
+def api_get_temp_email_shares(temp_email_id):
+    """获取临时邮箱分享链接列表"""
+    if not get_temp_email_by_id(temp_email_id):
+        return jsonify({'success': False, 'error': '临时邮箱不存在'}), 404
+
+    shares = list_temp_email_shares(temp_email_id)
+    return jsonify({'success': True, 'shares': shares, 'total': len(shares)})
+
+
+@app.route('/api/temp-emails/<int:temp_email_id>/shares', methods=['POST'])
+@login_required
+def api_create_temp_email_share(temp_email_id):
+    """创建临时邮箱分享链接"""
+    if not get_temp_email_by_id(temp_email_id):
+        return jsonify({'success': False, 'error': '临时邮箱不存在'}), 404
+
+    data = request.get_json(silent=True) or {}
+    expires_in, error = normalize_share_expires_in(data.get('expires_in'))
+    if error:
+        return jsonify({'success': False, 'error': error}), 400
+
+    share = create_temp_email_share(temp_email_id, expires_in)
+    if not share:
+        return jsonify({'success': False, 'error': '创建分享链接失败'}), 500
+    return jsonify({'success': True, 'share': share}), 201
+
+
+@app.route('/api/temp-emails/<int:temp_email_id>/shares/<int:share_id>', methods=['DELETE'])
+@login_required
+def api_delete_temp_email_share(temp_email_id, share_id):
+    """删除临时邮箱分享链接"""
+    if not get_temp_email_by_id(temp_email_id):
+        return jsonify({'success': False, 'error': '临时邮箱不存在'}), 404
+
+    if not delete_temp_email_share(temp_email_id, share_id):
+        return jsonify({'success': False, 'error': '分享链接不存在'}), 404
+    return jsonify({'success': True})
 
 
 @app.route('/api/temp-emails/tags', methods=['POST'])

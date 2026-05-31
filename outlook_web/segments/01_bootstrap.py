@@ -1072,6 +1072,19 @@ def init_db():
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     ''')
+
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS temp_email_shares (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            temp_email_id INTEGER NOT NULL,
+            token TEXT NOT NULL UNIQUE,
+            expires_at TIMESTAMP,
+            last_refreshed_at TIMESTAMP,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY(temp_email_id) REFERENCES temp_emails(id)
+        )
+    ''')
     
     # 创建临时邮件表（存储从 GPTMail 获取的邮件）
     cursor.execute('''
@@ -1835,6 +1848,16 @@ def init_db():
     cursor.execute('''
         CREATE INDEX IF NOT EXISTS idx_accounts_forward_enabled
         ON accounts(forward_enabled)
+    ''')
+
+    cursor.execute('''
+        CREATE INDEX IF NOT EXISTS idx_temp_email_shares_temp_email_id
+        ON temp_email_shares(temp_email_id)
+    ''')
+
+    cursor.execute('''
+        CREATE INDEX IF NOT EXISTS idx_temp_email_shares_token
+        ON temp_email_shares(token)
     ''')
 
     cursor.execute('''
