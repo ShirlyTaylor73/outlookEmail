@@ -755,19 +755,37 @@ def format_shared_temp_email_detail(msg: Dict[str, Any], email_addr: str) -> Dic
     }
 
 
+def parse_temp_message_timestamp(value: Any) -> int:
+    if not value:
+        return 0
+    if isinstance(value, (int, float)):
+        return int(value)
+    try:
+        return int(datetime.fromisoformat(str(value).replace('Z', '+00:00')).timestamp())
+    except Exception:
+        raise ValueError('invalid message timestamp')
+
+
+def first_html_part(value: Any) -> str:
+    if isinstance(value, list):
+        return value[0] if value else ''
+    return value or ''
+
+
 def normalize_duckmail_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     unified_messages = []
     for msg in messages:
         from_info = msg.get('from', {})
         from_addr = from_info.get('address', '') if isinstance(from_info, dict) else str(from_info)
+        html_content = first_html_part(msg.get('html'))
         unified_messages.append({
             'id': msg.get('id', ''),
             'from_address': from_addr,
             'subject': msg.get('subject', '无主题'),
             'content': msg.get('text', ''),
-            'html_content': msg.get('html', [''])[0] if isinstance(msg.get('html'), list) else (msg.get('html', '') or ''),
-            'has_html': bool(msg.get('html')),
-            'timestamp': int(datetime.fromisoformat(msg['createdAt'].replace('Z', '+00:00')).timestamp()) if msg.get('createdAt') else 0
+            'html_content': html_content,
+            'has_html': bool(html_content),
+            'timestamp': parse_temp_message_timestamp(msg.get('createdAt')),
         })
     return unified_messages
 
@@ -795,47 +813,50 @@ def normalize_cloudflare_messages(email_addr: str, messages: List[Dict[str, Any]
 
 def refresh_shared_temp_email_messages(share: Dict[str, Any], temp_email: Dict[str, Any]) -> Dict[str, Any]:
     """刷新公开分享临时邮箱；失败时不暴露上游错误。"""
-    email_addr = temp_email.get('email', '')
-    provider = temp_email.get('provider', 'gptmail')
-    method = TEMP_EMAIL_PROVIDER_LABELS.get(provider, 'GPTMail')
+    try:
+        email_addr = temp_email.get('email', '')
+        provider = temp_email.get('provider', 'gptmail')
+        method = TEMP_EMAIL_PROVIDER_LABELS.get(provider, 'GPTMail')
 
-    if provider == 'duckmail':
-        token = get_duckmail_token_for_email(email_addr)
-        if not token:
-            token = duckmail_refresh_token(email_addr)
-        if not token:
-            return {'success': False, 'error': '刷新邮件失败'}
+        if provider == 'duckmail':
+            token = get_duckmail_token_for_email(email_addr)
+            if not token:
+                token = duckmail_refresh_token(email_addr)
+            if not token:
+                return {'success': False, 'error': '刷新邮件失败'}
 
-        messages = duckmail_get_messages(token)
-        if messages is None:
-            token = duckmail_refresh_token(email_addr)
-            if token:
-                messages = duckmail_get_messages(token)
-        if messages is None:
-            return {'success': False, 'error': '刷新邮件失败'}
-        saved = save_temp_email_messages(email_addr, normalize_duckmail_messages(messages))
-    elif provider == 'cloudflare':
-        jwt = get_cloudflare_jwt_for_email(email_addr)
-        if not jwt:
-            return {'success': False, 'error': '刷新邮件失败'}
-        messages = cloudflare_get_messages(jwt)
-        if messages is None:
-            return {'success': False, 'error': '刷新邮件失败'}
-        saved = save_temp_email_messages(email_addr, normalize_cloudflare_messages(email_addr, messages))
-    else:
-        api_messages = get_temp_emails_from_api(email_addr)
-        if api_messages is None:
-            return {'success': False, 'error': '刷新邮件失败'}
-        saved = save_temp_email_messages(email_addr, api_messages)
+            messages = duckmail_get_messages(token)
+            if messages is None:
+                token = duckmail_refresh_token(email_addr)
+                if token:
+                    messages = duckmail_get_messages(token)
+            if messages is None:
+                return {'success': False, 'error': '刷新邮件失败'}
+            saved = save_temp_email_messages(email_addr, normalize_duckmail_messages(messages))
+        elif provider == 'cloudflare':
+            jwt = get_cloudflare_jwt_for_email(email_addr)
+            if not jwt:
+                return {'success': False, 'error': '刷新邮件失败'}
+            messages = cloudflare_get_messages(jwt)
+            if messages is None:
+                return {'success': False, 'error': '刷新邮件失败'}
+            saved = save_temp_email_messages(email_addr, normalize_cloudflare_messages(email_addr, messages))
+        else:
+            api_messages = get_temp_emails_from_api(email_addr)
+            if api_messages is None:
+                return {'success': False, 'error': '刷新邮件失败'}
+            saved = save_temp_email_messages(email_addr, api_messages)
 
-    cached = get_temp_email_messages(email_addr)
-    return {
-        'success': True,
-        'new_count': saved,
-        'method': method,
-        'emails': format_temp_email_message_list(cached),
-        'count': len(cached),
-    }
+        cached = get_temp_email_messages(email_addr)
+        return {
+            'success': True,
+            'new_count': saved,
+            'method': method,
+            'emails': format_temp_email_message_list(cached),
+            'count': len(cached),
+        }
+    except Exception:
+        return {'success': False, 'error': '刷新邮件失败'}
 
 
 def cleanup_temp_email_provider_resource(temp_email: Optional[Dict]) -> None:

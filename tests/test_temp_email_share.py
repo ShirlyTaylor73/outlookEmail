@@ -256,6 +256,27 @@ class TempEmailShareTests(unittest.TestCase):
         self.assertFalse(first.get_json()['throttled'])
         self.assertTrue(second.get_json()['throttled'])
 
+    def test_public_refresh_hides_upstream_parse_errors(self):
+        temp_email_id = self._create_temp_email('duck-refresh@example.com', provider='duckmail')
+        token = self._create_share(temp_email_id)['token']
+
+        with patch.object(web_outlook_app, 'get_duckmail_token_for_email', return_value='duck-token'), \
+                patch.object(web_outlook_app, 'duckmail_get_messages', return_value=[{
+                    'id': 'duck-msg',
+                    'from': {'address': 'sender@example.com'},
+                    'subject': 'Bad timestamp',
+                    'text': 'body',
+                    'html': [],
+                    'createdAt': 'not-a-date',
+                }]):
+            response = self.public_client.post(f'/api/shared/{token}/refresh')
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertFalse(payload['success'])
+        self.assertEqual(payload['error'], '刷新邮件失败')
+        self.assertNotIn('not-a-date', response.get_data(as_text=True))
+
 
 if __name__ == '__main__':
     unittest.main()
