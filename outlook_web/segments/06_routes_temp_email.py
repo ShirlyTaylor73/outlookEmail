@@ -470,6 +470,13 @@ def get_duckmail_token_for_email(email_addr: str) -> Optional[str]:
 SHARE_EXPIRY_OPTIONS_MS = {3600000, 86400000, 259200000, 2592000000, 0}
 DEFAULT_SHARE_EXPIRY_MS = 2592000000
 SHARE_TOKEN_RETRY_LIMIT = 5
+SHARED_TEMP_EMAIL_REFRESH_THROTTLE_SECONDS = 30
+
+TEMP_EMAIL_PROVIDER_LABELS = {
+    'gptmail': 'GPTMail',
+    'duckmail': 'DuckMail',
+    'cloudflare': 'Cloudflare',
+}
 
 def get_temp_email_group_id() -> int:
     """获取临时邮箱分组的 ID"""
@@ -678,6 +685,159 @@ def delete_temp_email_share(temp_email_id: int, share_id: int) -> bool:
     return cursor.rowcount > 0
 
 
+def parse_sqlite_timestamp(value: Any) -> Optional[datetime]:
+    """解析 SQLite/ISO 时间为无时区 UTC datetime。"""
+    if not value:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text.replace('Z', '+00:00'))
+    except ValueError:
+        try:
+            parsed = datetime.strptime(text, '%Y-%m-%d %H:%M:%S')
+        except ValueError:
+            return None
+    if parsed.tzinfo:
+        parsed = parsed.astimezone(timezone.utc).replace(tzinfo=None)
+    return parsed
+
+
+def get_valid_temp_email_share(token: str):
+    """获取有效分享和关联临时邮箱，失败时返回公开 API 错误响应。"""
+    if not token:
+        return None, None, (jsonify({'success': False, 'error': '分享链接不存在'}), 404)
+
+    db = get_db()
+    share_row = db.execute(
+        'SELECT * FROM temp_email_shares WHERE token = ?',
+        (token,)
+    ).fetchone()
+    if not share_row:
+        return None, None, (jsonify({'success': False, 'error': '分享链接不存在'}), 404)
+
+    share = dict(share_row)
+    expires_at = parse_sqlite_timestamp(share.get('expires_at'))
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    if expires_at and expires_at < now:
+        return None, None, (jsonify({'success': False, 'error': '分享链接已过期'}), 410)
+
+    temp_email = get_temp_email_by_id(share.get('temp_email_id'))
+    if not temp_email:
+        return None, None, (jsonify({'success': False, 'error': '临时邮箱不存在'}), 404)
+    return share, temp_email, None
+
+
+def format_temp_email_message_list(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """格式化公开临时邮箱邮件列表。"""
+    return [{
+        'id': msg.get('message_id') or msg.get('id'),
+        'from': msg.get('from_address', '未知'),
+        'subject': msg.get('subject', '无主题'),
+        'body_preview': (msg.get('content', '') or '')[:200],
+        'date': msg.get('created_at', ''),
+        'timestamp': msg.get('timestamp', 0),
+        'has_html': 1 if msg.get('has_html') else 0,
+    } for msg in messages]
+
+
+def format_shared_temp_email_detail(msg: Dict[str, Any], email_addr: str) -> Dict[str, Any]:
+    return {
+        'id': msg.get('message_id') or msg.get('id'),
+        'from': msg.get('from_address', '未知'),
+        'to': email_addr,
+        'subject': msg.get('subject', '无主题'),
+        'body': msg.get('html_content') if msg.get('has_html') else msg.get('content', ''),
+        'body_type': 'html' if msg.get('has_html') else 'text',
+        'date': msg.get('created_at', ''),
+        'timestamp': msg.get('timestamp', 0),
+    }
+
+
+def normalize_duckmail_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    unified_messages = []
+    for msg in messages:
+        from_info = msg.get('from', {})
+        from_addr = from_info.get('address', '') if isinstance(from_info, dict) else str(from_info)
+        unified_messages.append({
+            'id': msg.get('id', ''),
+            'from_address': from_addr,
+            'subject': msg.get('subject', '无主题'),
+            'content': msg.get('text', ''),
+            'html_content': msg.get('html', [''])[0] if isinstance(msg.get('html'), list) else (msg.get('html', '') or ''),
+            'has_html': bool(msg.get('html')),
+            'timestamp': int(datetime.fromisoformat(msg['createdAt'].replace('Z', '+00:00')).timestamp()) if msg.get('createdAt') else 0
+        })
+    return unified_messages
+
+
+def normalize_cloudflare_messages(email_addr: str, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    unified_messages = []
+    for index, item in enumerate(messages):
+        raw_email = item.get('raw')
+        if not raw_email:
+            continue
+        fallback_id = item.get('id') or f"{email_addr}-{index}-{hashlib.sha256(raw_email.encode('utf-8', 'replace')).hexdigest()}"
+        fallback_timestamp = 0
+        for key in ('createdAt', 'created_at', 'date'):
+            if item.get(key):
+                try:
+                    fallback_timestamp = int(datetime.fromisoformat(str(item[key]).replace('Z', '+00:00')).timestamp())
+                    break
+                except Exception:
+                    continue
+        unified_messages.append(
+            parse_raw_email_to_temp_message(email_addr, raw_email, fallback_id, fallback_timestamp)
+        )
+    return unified_messages
+
+
+def refresh_shared_temp_email_messages(share: Dict[str, Any], temp_email: Dict[str, Any]) -> Dict[str, Any]:
+    """刷新公开分享临时邮箱；失败时不暴露上游错误。"""
+    email_addr = temp_email.get('email', '')
+    provider = temp_email.get('provider', 'gptmail')
+    method = TEMP_EMAIL_PROVIDER_LABELS.get(provider, 'GPTMail')
+
+    if provider == 'duckmail':
+        token = get_duckmail_token_for_email(email_addr)
+        if not token:
+            token = duckmail_refresh_token(email_addr)
+        if not token:
+            return {'success': False, 'error': '刷新邮件失败'}
+
+        messages = duckmail_get_messages(token)
+        if messages is None:
+            token = duckmail_refresh_token(email_addr)
+            if token:
+                messages = duckmail_get_messages(token)
+        if messages is None:
+            return {'success': False, 'error': '刷新邮件失败'}
+        saved = save_temp_email_messages(email_addr, normalize_duckmail_messages(messages))
+    elif provider == 'cloudflare':
+        jwt = get_cloudflare_jwt_for_email(email_addr)
+        if not jwt:
+            return {'success': False, 'error': '刷新邮件失败'}
+        messages = cloudflare_get_messages(jwt)
+        if messages is None:
+            return {'success': False, 'error': '刷新邮件失败'}
+        saved = save_temp_email_messages(email_addr, normalize_cloudflare_messages(email_addr, messages))
+    else:
+        api_messages = get_temp_emails_from_api(email_addr)
+        if api_messages is None:
+            return {'success': False, 'error': '刷新邮件失败'}
+        saved = save_temp_email_messages(email_addr, api_messages)
+
+    cached = get_temp_email_messages(email_addr)
+    return {
+        'success': True,
+        'new_count': saved,
+        'method': method,
+        'emails': format_temp_email_message_list(cached),
+        'count': len(cached),
+    }
+
+
 def cleanup_temp_email_provider_resource(temp_email: Optional[Dict]) -> None:
     """删除临时邮箱前同步清理上游资源"""
     if not temp_email:
@@ -810,6 +970,88 @@ def api_delete_temp_email_share(temp_email_id, share_id):
     if not delete_temp_email_share(temp_email_id, share_id):
         return jsonify({'success': False, 'error': '分享链接不存在'}), 404
     return jsonify({'success': True})
+
+
+@app.route('/api/shared/<token>', methods=['GET'])
+def api_shared_temp_email(token):
+    """公开获取分享临时邮箱信息。"""
+    share, temp_email, error_response = get_valid_temp_email_share(token)
+    if error_response:
+        return error_response
+
+    provider = temp_email.get('provider', 'gptmail')
+    return jsonify({
+        'success': True,
+        'email': {
+            'email': temp_email.get('email'),
+            'provider': provider,
+            'provider_label': TEMP_EMAIL_PROVIDER_LABELS.get(provider, 'GPTMail'),
+            'created_at': temp_email.get('created_at'),
+            'expires_at': share.get('expires_at'),
+        }
+    })
+
+
+@app.route('/api/shared/<token>/messages', methods=['GET'])
+def api_shared_temp_email_messages(token):
+    """公开获取分享临时邮箱缓存邮件列表。"""
+    share, temp_email, error_response = get_valid_temp_email_share(token)
+    if error_response:
+        return error_response
+
+    messages = get_temp_email_messages(temp_email.get('email', ''))
+    formatted = format_temp_email_message_list(messages)
+    return jsonify({'success': True, 'emails': formatted, 'count': len(formatted)})
+
+
+@app.route('/api/shared/<token>/messages/<path:message_id>', methods=['GET'])
+def api_shared_temp_email_message_detail(token, message_id):
+    """公开获取分享临时邮箱邮件详情。"""
+    share, temp_email, error_response = get_valid_temp_email_share(token)
+    if error_response:
+        return error_response
+
+    msg = get_temp_email_message_by_id(message_id)
+    if not msg or msg.get('email_address') != temp_email.get('email'):
+        return jsonify({'success': False, 'error': '邮件不存在'}), 404
+
+    return jsonify({
+        'success': True,
+        'email': format_shared_temp_email_detail(msg, temp_email.get('email', ''))
+    })
+
+
+@app.route('/api/shared/<token>/refresh', methods=['POST'])
+@csrf_exempt
+def api_refresh_shared_temp_email_messages(token):
+    """公开刷新分享临时邮箱邮件，按 token 做 30 秒节流。"""
+    share, temp_email, error_response = get_valid_temp_email_share(token)
+    if error_response:
+        return error_response
+
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    last_refreshed_at = parse_sqlite_timestamp(share.get('last_refreshed_at'))
+    email_addr = temp_email.get('email', '')
+    if last_refreshed_at and (now - last_refreshed_at).total_seconds() < SHARED_TEMP_EMAIL_REFRESH_THROTTLE_SECONDS:
+        messages = get_temp_email_messages(email_addr)
+        formatted = format_temp_email_message_list(messages)
+        return jsonify({
+            'success': True,
+            'emails': formatted,
+            'count': len(formatted),
+            'throttled': True,
+        })
+
+    db = get_db()
+    db.execute(
+        'UPDATE temp_email_shares SET last_refreshed_at = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?',
+        (now.strftime('%Y-%m-%dT%H:%M:%SZ'), share.get('id'))
+    )
+    db.commit()
+
+    result = refresh_shared_temp_email_messages(share, temp_email)
+    result['throttled'] = False
+    return jsonify(result)
 
 
 @app.route('/api/temp-emails/tags', methods=['POST'])
