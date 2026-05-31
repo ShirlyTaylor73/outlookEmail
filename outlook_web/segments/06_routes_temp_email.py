@@ -972,6 +972,16 @@ def api_delete_temp_email_share(temp_email_id, share_id):
     return jsonify({'success': True})
 
 
+@app.route('/shared/<token>', methods=['GET'])
+@csrf_exempt
+def shared_temp_email_page(token):
+    share, temp_email, error_response = get_valid_temp_email_share(token)
+    status_code = 200
+    if error_response:
+        status_code = error_response[1] if isinstance(error_response, tuple) else 404
+    return render_template('shared_temp_email.html', token=token, initial_status=status_code)
+
+
 @app.route('/api/shared/<token>', methods=['GET'])
 def api_shared_temp_email(token):
     """公开获取分享临时邮箱信息。"""

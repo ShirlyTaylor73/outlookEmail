@@ -1,0 +1,339 @@
+:root {
+    color-scheme: light;
+    --shared-bg: #f6f7f8;
+    --shared-panel: #ffffff;
+    --shared-border: #d9dee5;
+    --shared-border-strong: #b9c2cc;
+    --shared-text: #1f2933;
+    --shared-muted: #667280;
+    --shared-soft: #eef1f4;
+    --shared-hover: #f1f4f7;
+    --shared-focus: #2563eb;
+    --shared-error: #9f2f2f;
+    --shared-error-bg: #fff1f1;
+    --shared-warning: #7a5200;
+    --shared-warning-bg: #fff7df;
+    --shared-success: #1f6b3a;
+    --shared-success-bg: #edf8f1;
+}
+
+* {
+    box-sizing: border-box;
+}
+
+body {
+    margin: 0;
+    background: var(--shared-bg);
+    color: var(--shared-text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", Arial, sans-serif;
+    font-size: 15px;
+    line-height: 1.5;
+}
+
+.shared-shell {
+    width: min(1180px, calc(100% - 32px));
+    margin: 0 auto;
+    padding: 28px 0;
+}
+
+.shared-header {
+    display: flex;
+    align-items: flex-end;
+    justify-content: space-between;
+    gap: 20px;
+    margin-bottom: 16px;
+}
+
+.shared-title-group {
+    min-width: 0;
+}
+
+.shared-kicker {
+    margin: 0 0 4px;
+    color: var(--shared-muted);
+    font-size: 13px;
+}
+
+.shared-header h1 {
+    margin: 0;
+    overflow-wrap: anywhere;
+    font-size: 28px;
+    font-weight: 650;
+    line-height: 1.2;
+}
+
+.shared-meta {
+    margin: 8px 0 0;
+    color: var(--shared-muted);
+    overflow-wrap: anywhere;
+}
+
+.shared-refresh {
+    flex: 0 0 auto;
+    min-height: 38px;
+    padding: 0 16px;
+    border: 1px solid var(--shared-border-strong);
+    border-radius: 6px;
+    background: var(--shared-panel);
+    color: var(--shared-text);
+    cursor: pointer;
+    font: inherit;
+}
+
+.shared-refresh:hover:not(:disabled) {
+    background: var(--shared-hover);
+}
+
+.shared-refresh:disabled {
+    cursor: not-allowed;
+    opacity: 0.58;
+}
+
+.shared-status {
+    display: none;
+    margin-bottom: 16px;
+    padding: 10px 12px;
+    border: 1px solid var(--shared-border);
+    border-radius: 6px;
+    background: var(--shared-panel);
+    color: var(--shared-muted);
+}
+
+.shared-status.is-visible {
+    display: block;
+}
+
+.shared-status.is-error {
+    border-color: #efc7c7;
+    background: var(--shared-error-bg);
+    color: var(--shared-error);
+}
+
+.shared-status.is-warning {
+    border-color: #f0d58c;
+    background: var(--shared-warning-bg);
+    color: var(--shared-warning);
+}
+
+.shared-status.is-success {
+    border-color: #b7dfc4;
+    background: var(--shared-success-bg);
+    color: var(--shared-success);
+}
+
+.shared-workbench {
+    display: grid;
+    grid-template-columns: minmax(280px, 380px) minmax(0, 1fr);
+    gap: 16px;
+    align-items: start;
+}
+
+.shared-list-panel,
+.shared-detail-panel {
+    min-width: 0;
+    border: 1px solid var(--shared-border);
+    border-radius: 8px;
+    background: var(--shared-panel);
+}
+
+.shared-list-panel {
+    overflow: hidden;
+}
+
+.panel-heading {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 14px 16px;
+    border-bottom: 1px solid var(--shared-border);
+}
+
+.panel-heading h2,
+.detail-header h2 {
+    margin: 0;
+    font-size: 16px;
+    font-weight: 650;
+}
+
+#sharedEmailCount {
+    min-width: 28px;
+    padding: 2px 8px;
+    border-radius: 999px;
+    background: var(--shared-soft);
+    color: var(--shared-muted);
+    text-align: center;
+    font-size: 13px;
+}
+
+.shared-email-list {
+    max-height: calc(100vh - 190px);
+    overflow: auto;
+}
+
+.message-item {
+    display: block;
+    width: 100%;
+    padding: 13px 16px;
+    border: 0;
+    border-bottom: 1px solid var(--shared-border);
+    background: transparent;
+    color: inherit;
+    cursor: pointer;
+    font: inherit;
+    text-align: left;
+}
+
+.message-item:hover,
+.message-item.is-selected {
+    background: var(--shared-hover);
+}
+
+.message-item.is-selected {
+    box-shadow: inset 3px 0 0 var(--shared-focus);
+}
+
+.message-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+}
+
+.message-from,
+.message-subject,
+.message-preview,
+.message-date {
+    display: block;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.message-from {
+    min-width: 0;
+    flex: 1 1 auto;
+    font-weight: 600;
+}
+
+.message-subject {
+    margin-top: 5px;
+    color: var(--shared-text);
+}
+
+.message-preview {
+    margin-top: 4px;
+    color: var(--shared-muted);
+    font-size: 13px;
+}
+
+.message-date {
+    margin-top: 6px;
+    color: var(--shared-muted);
+    font-size: 12px;
+}
+
+.message-badge {
+    flex: 0 0 auto;
+    padding: 1px 6px;
+    border: 1px solid var(--shared-border);
+    border-radius: 999px;
+    color: var(--shared-muted);
+    font-size: 11px;
+}
+
+.shared-detail-panel {
+    min-height: 420px;
+}
+
+.detail-header {
+    padding: 18px 20px 16px;
+    border-bottom: 1px solid var(--shared-border);
+}
+
+.detail-header h2 {
+    overflow-wrap: anywhere;
+}
+
+.detail-meta {
+    display: grid;
+    gap: 8px;
+    margin: 14px 0 0;
+}
+
+.detail-meta div {
+    display: grid;
+    grid-template-columns: 64px minmax(0, 1fr);
+    gap: 10px;
+}
+
+.detail-meta dt {
+    color: var(--shared-muted);
+}
+
+.detail-meta dd {
+    margin: 0;
+    min-width: 0;
+    overflow-wrap: anywhere;
+}
+
+.detail-body {
+    padding: 20px;
+    overflow-wrap: anywhere;
+    word-break: break-word;
+}
+
+.detail-body img,
+.detail-body table,
+.detail-body pre {
+    max-width: 100%;
+}
+
+.shared-empty,
+.shared-error {
+    padding: 22px;
+    color: var(--shared-muted);
+}
+
+.shared-error {
+    color: var(--shared-error);
+}
+
+button:focus-visible {
+    outline: 2px solid var(--shared-focus);
+    outline-offset: 2px;
+}
+
+@media (max-width: 760px) {
+    .shared-shell {
+        width: min(100% - 20px, 1180px);
+        padding: 18px 0;
+    }
+
+    .shared-header,
+    .shared-workbench {
+        display: block;
+    }
+
+    .shared-refresh {
+        width: 100%;
+        margin-top: 14px;
+    }
+
+    .shared-list-panel {
+        margin-bottom: 14px;
+    }
+
+    .shared-email-list {
+        max-height: none;
+    }
+
+    .shared-detail-panel {
+        min-height: 300px;
+    }
+
+    .detail-meta div {
+        grid-template-columns: 1fr;
+        gap: 2px;
+    }
+}

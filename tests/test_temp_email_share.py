@@ -133,6 +133,26 @@ class TempEmailShareTests(unittest.TestCase):
         public = self.public_client.get(f'/api/shared/{created["token"]}')
         self.assertEqual(public.status_code, 404)
 
+    def test_shared_page_renders_without_login(self):
+        temp_email_id = self._create_temp_email('page@example.com')
+        token = self._create_share(temp_email_id)['token']
+
+        response = self.public_client.get(f'/shared/{token}')
+
+        self.assertEqual(response.status_code, 200)
+        html = response.get_data(as_text=True)
+        self.assertIn(f'data-share-token="{token}"', html)
+        self.assertIn('shared-temp-email.js', html)
+
+    def test_shared_page_uses_dompurify_for_html_detail(self):
+        script_path = os.path.join(ROOT_DIR, 'static', 'js', 'shared-temp-email.js')
+
+        with open(script_path, encoding='utf-8') as script_file:
+            script = script_file.read()
+
+        self.assertIn('DOMPurify.sanitize', script)
+        self.assertIn('body_type ===', script)
+
     def test_public_shared_email_and_message_detail_do_not_require_login(self):
         temp_email_id = self._create_temp_email('public@example.com')
         self._save_temp_email_messages('public@example.com', [{
