@@ -1782,6 +1782,47 @@
             line-height: 1.5;
         }
 
+        .temp-email-share-list {
+            display: grid;
+            gap: 10px;
+            margin-top: 18px;
+        }
+
+        .temp-email-share-item {
+            display: grid;
+            gap: 8px;
+            padding: 12px;
+            border: 1px solid #e5e5e5;
+            border-radius: 8px;
+            background: #ffffff;
+        }
+
+        .temp-email-share-item.is-expired {
+            background: #fafafa;
+            opacity: 0.72;
+        }
+
+        .temp-email-share-url {
+            overflow: hidden;
+            color: #1a1a1a;
+            font-size: 13px;
+            font-family: Consolas, Monaco, monospace;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
+        .temp-email-share-meta {
+            color: #666;
+            font-size: 13px;
+            line-height: 1.5;
+        }
+
+        .temp-email-share-actions {
+            display: flex;
+            justify-content: flex-end;
+            gap: 8px;
+        }
+
         /* 消息提示 */
         .toast {
             position: fixed;
