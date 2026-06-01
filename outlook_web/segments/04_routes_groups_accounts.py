@@ -918,22 +918,6 @@ def get_mailbox_claim_resource(db, resource_type: str, resource_id: int):
     ).fetchone()
 
 
-def get_mailbox_claim_by_token(claim_token: str):
-    token = str(claim_token or '').strip()
-    if not token:
-        return None
-    return get_db().execute(
-        '''
-        SELECT *
-        FROM mailbox_claims
-        WHERE claim_token = ?
-        ORDER BY id DESC
-        LIMIT 1
-        ''',
-        (token,)
-    ).fetchone()
-
-
 def claim_external_mailbox(source_group_id, caller_id: str, task_id: str,
                            lease_seconds: int = MAILBOX_CLAIM_DEFAULT_LEASE_SECONDS):
     source_group_id = parse_mailbox_claim_int(source_group_id, 'source_group_id')
@@ -1214,16 +1198,12 @@ def mailbox_claim_json_error(message: str, status_code: int):
     return jsonify({'success': False, 'error': message}), status_code
 
 
-def resolve_mailbox_claim_resource_from_payload(data: Dict[str, Any], claim_token: str):
-    resource_type = data.get('resource_type')
-    resource_id = data.get('resource_id')
-    if resource_type not in (None, '') and resource_id not in (None, ''):
-        return normalize_mailbox_claim_resource_type(resource_type), parse_mailbox_claim_int(resource_id, 'resource_id'), None
-
-    claim = get_mailbox_claim_by_token(claim_token)
-    if not claim:
-        return None, None, None
-    return claim['resource_type'], int(claim['resource_id']), claim
+def parse_mailbox_claim_resource_identity(data: Dict[str, Any]):
+    if data.get('resource_type') in (None, ''):
+        raise ValueError('缺少 resource_type')
+    resource_type = normalize_mailbox_claim_resource_type(data.get('resource_type'))
+    resource_id = parse_mailbox_claim_int(data.get('resource_id'), 'resource_id')
+    return resource_type, resource_id
 
 
 @app.route('/api/external/mailboxes/claim', methods=['POST'])
@@ -1258,11 +1238,9 @@ def api_external_complete_mailbox_claim():
         return mailbox_claim_json_error('缺少 claim_token', 400)
     try:
         target_group_id = parse_mailbox_claim_int(data.get('target_group_id'), 'target_group_id')
-        resource_type, resource_id, claim = resolve_mailbox_claim_resource_from_payload(data, claim_token)
-        if not resource_type or not resource_id:
-            return mailbox_claim_json_error('领取 token 状态冲突', 409)
-        caller_id = str(data.get('caller_id') or (claim['caller_id'] if claim else '') or '').strip()
-        task_id = str(data.get('task_id') or (claim['task_id'] if claim else '') or '').strip()
+        resource_type, resource_id = parse_mailbox_claim_resource_identity(data)
+        caller_id = str(data.get('caller_id') or '').strip()
+        task_id = str(data.get('task_id') or '').strip()
         detail = data.get('detail', '')
         completed = complete_external_mailbox_claim(
             resource_type,
@@ -1291,11 +1269,9 @@ def api_external_release_mailbox_claim():
     if not claim_token:
         return mailbox_claim_json_error('缺少 claim_token', 400)
     try:
-        resource_type, resource_id, claim = resolve_mailbox_claim_resource_from_payload(data, claim_token)
-        if not resource_type or not resource_id:
-            return mailbox_claim_json_error('领取 token 状态冲突', 409)
-        caller_id = str(data.get('caller_id') or (claim['caller_id'] if claim else '') or '').strip()
-        task_id = str(data.get('task_id') or (claim['task_id'] if claim else '') or '').strip()
+        resource_type, resource_id = parse_mailbox_claim_resource_identity(data)
+        caller_id = str(data.get('caller_id') or '').strip()
+        task_id = str(data.get('task_id') or '').strip()
         detail = data.get('detail', '')
         released = release_external_mailbox_claim(
             resource_type,

@@ -5,6 +5,7 @@ import sqlite3
 import sys
 import tempfile
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 
 
 os.environ.setdefault('SECRET_KEY', 'test-secret-key')
@@ -162,17 +163,52 @@ class ExternalMailboxClaimTests(unittest.TestCase):
             headers=self._headers() if headers is None else headers,
         )
 
-    def _release(self, claim_token, headers=None):
+    def _release(
+            self,
+            mailbox=None,
+            claim_token=None,
+            resource_type=None,
+            resource_id=None,
+            headers=None,
+            include_resource_type=True,
+            include_resource_id=True):
+        if mailbox:
+            claim_token = mailbox['claim_token'] if claim_token is None else claim_token
+            resource_type = mailbox['resource_type'] if resource_type is None else resource_type
+            resource_id = mailbox['resource_id'] if resource_id is None else resource_id
+        payload = {'claim_token': claim_token}
+        if include_resource_type:
+            payload['resource_type'] = resource_type
+        if include_resource_id:
+            payload['resource_id'] = resource_id
         return self.client.post(
             '/api/external/mailboxes/release',
-            json={'claim_token': claim_token},
+            json=payload,
             headers=self._headers() if headers is None else headers,
         )
 
-    def _complete(self, claim_token, target_group_id, headers=None):
+    def _complete(
+            self,
+            mailbox=None,
+            target_group_id=None,
+            claim_token=None,
+            resource_type=None,
+            resource_id=None,
+            headers=None,
+            include_resource_type=True,
+            include_resource_id=True):
+        if mailbox:
+            claim_token = mailbox['claim_token'] if claim_token is None else claim_token
+            resource_type = mailbox['resource_type'] if resource_type is None else resource_type
+            resource_id = mailbox['resource_id'] if resource_id is None else resource_id
+        payload = {'claim_token': claim_token, 'target_group_id': target_group_id}
+        if include_resource_type:
+            payload['resource_type'] = resource_type
+        if include_resource_id:
+            payload['resource_id'] = resource_id
         return self.client.post(
             '/api/external/mailboxes/complete',
-            json={'claim_token': claim_token, 'target_group_id': target_group_id},
+            json=payload,
             headers=self._headers() if headers is None else headers,
         )
 
@@ -277,6 +313,35 @@ class ExternalMailboxClaimTests(unittest.TestCase):
         self.assertEqual(third.status_code, 200)
         self.assertIsNone(third.get_json()['mailbox'])
 
+    def test_concurrent_claims_do_not_return_duplicate_resource_ids(self):
+        account_ids = {
+            self._insert_account(f'concurrent-{index}@example.com', self.account_group_id)
+            for index in range(8)
+        }
+
+        def claim_in_thread(index):
+            client = self.app.test_client()
+            response = client.post(
+                '/api/external/mailboxes/claim',
+                json={
+                    'source_group_id': self.account_group_id,
+                    'caller_id': f'worker-{index}',
+                    'task_id': f'task-{index}',
+                },
+                headers=self._headers(),
+            )
+            return response.status_code, response.get_json()
+
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            results = list(executor.map(claim_in_thread, range(8)))
+
+        self.assertTrue(all(status_code == 200 for status_code, _ in results))
+        mailboxes = [payload['mailbox'] for _, payload in results if payload['mailbox']]
+        resource_ids = [mailbox['resource_id'] for mailbox in mailboxes]
+        self.assertEqual(len(mailboxes), len(account_ids))
+        self.assertEqual(set(resource_ids), account_ids)
+        self.assertEqual(len(resource_ids), len(set(resource_ids)))
+
     def test_claim_single_resource_returns_null_on_second_claim(self):
         account_id = self._insert_account('single@example.com', self.account_group_id)
 
@@ -291,7 +356,7 @@ class ExternalMailboxClaimTests(unittest.TestCase):
         account_id = self._insert_account('release@example.com', self.account_group_id)
         first = self._mailbox(self._claim(self.account_group_id))
 
-        release = self._release(first['claim_token'])
+        release = self._release(first)
         second = self._mailbox(self._claim(self.account_group_id, caller_id='worker-2', task_id='task-2'))
 
         self.assertEqual(release.status_code, 200)
@@ -303,17 +368,31 @@ class ExternalMailboxClaimTests(unittest.TestCase):
         self.assertEqual(group_id, self.account_group_id)
 
     def test_release_with_wrong_token_returns_409(self):
-        self._insert_account('wrong-release@example.com', self.account_group_id)
+        account_id = self._insert_account('wrong-release@example.com', self.account_group_id)
 
-        response = self._release('wrong-token')
+        response = self._release(
+            claim_token='wrong-token',
+            resource_type='account',
+            resource_id=account_id,
+        )
 
         self.assertEqual(response.status_code, 409)
+
+    def test_release_requires_resource_type_and_resource_id(self):
+        self._insert_account('missing-release-resource@example.com', self.account_group_id)
+        mailbox = self._mailbox(self._claim(self.account_group_id))
+
+        missing_type = self._release(mailbox, include_resource_type=False)
+        missing_id = self._release(mailbox, include_resource_id=False)
+
+        self.assertEqual(missing_type.status_code, 400)
+        self.assertEqual(missing_id.status_code, 400)
 
     def test_complete_account_moves_to_account_target_group(self):
         account_id = self._insert_account('complete@example.com', self.account_group_id)
         mailbox = self._mailbox(self._claim(self.account_group_id))
 
-        response = self._complete(mailbox['claim_token'], self.account_target_group_id)
+        response = self._complete(mailbox, self.account_target_group_id)
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(self._claim_status(mailbox['claim_token']), 'completed')
@@ -326,7 +405,7 @@ class ExternalMailboxClaimTests(unittest.TestCase):
         temp_email_id = self._insert_temp_email('complete-temp@example.com', self.temp_group_id)
         mailbox = self._mailbox(self._claim(self.temp_group_id))
 
-        response = self._complete(mailbox['claim_token'], self.temp_target_group_id)
+        response = self._complete(mailbox, self.temp_target_group_id)
 
         self.assertEqual(response.status_code, 200)
         with self.app.app_context():
@@ -341,16 +420,39 @@ class ExternalMailboxClaimTests(unittest.TestCase):
         self._insert_account('mismatch@example.com', self.account_group_id)
         mailbox = self._mailbox(self._claim(self.account_group_id))
 
-        response = self._complete(mailbox['claim_token'], self.temp_target_group_id)
+        response = self._complete(mailbox, self.temp_target_group_id)
 
         self.assertEqual(response.status_code, 400)
 
     def test_complete_with_wrong_token_returns_409(self):
-        self._insert_account('wrong-complete@example.com', self.account_group_id)
+        account_id = self._insert_account('wrong-complete@example.com', self.account_group_id)
 
-        response = self._complete('wrong-token', self.account_target_group_id)
+        response = self._complete(
+            target_group_id=self.account_target_group_id,
+            claim_token='wrong-token',
+            resource_type='account',
+            resource_id=account_id,
+        )
 
         self.assertEqual(response.status_code, 409)
+
+    def test_complete_requires_resource_type_and_resource_id(self):
+        self._insert_account('missing-complete-resource@example.com', self.account_group_id)
+        mailbox = self._mailbox(self._claim(self.account_group_id))
+
+        missing_type = self._complete(
+            mailbox,
+            self.account_target_group_id,
+            include_resource_type=False,
+        )
+        missing_id = self._complete(
+            mailbox,
+            self.account_target_group_id,
+            include_resource_id=False,
+        )
+
+        self.assertEqual(missing_type.status_code, 400)
+        self.assertEqual(missing_id.status_code, 400)
 
     def test_claim_lazily_expires_old_claims(self):
         self._insert_account('expire-one@example.com', self.account_group_id)
@@ -381,7 +483,7 @@ class ExternalMailboxClaimTests(unittest.TestCase):
             )
             db.commit()
 
-        response = self._complete(mailbox['claim_token'], self.account_target_group_id)
+        response = self._complete(mailbox, self.account_target_group_id)
 
         self.assertEqual(response.status_code, 200)
         with self.app.app_context():
@@ -401,7 +503,7 @@ class ExternalMailboxClaimTests(unittest.TestCase):
             )
             db.commit()
 
-        response = self._release(mailbox['claim_token'])
+        response = self._release(mailbox)
 
         self.assertEqual(response.status_code, 409)
 
@@ -418,7 +520,7 @@ class ExternalMailboxClaimTests(unittest.TestCase):
             db.commit()
         new_mailbox = self._mailbox(self._claim(self.account_group_id, caller_id='worker-2', task_id='task-2'))
 
-        response = self._complete(old_mailbox['claim_token'], self.account_target_group_id)
+        response = self._complete(old_mailbox, self.account_target_group_id)
 
         self.assertNotEqual(new_mailbox['claim_token'], old_mailbox['claim_token'])
         self.assertEqual(response.status_code, 409)
@@ -436,7 +538,7 @@ class ExternalMailboxClaimTests(unittest.TestCase):
             db.commit()
         new_mailbox = self._mailbox(self._claim(self.account_group_id, caller_id='worker-2', task_id='task-2'))
 
-        response = self._release(old_mailbox['claim_token'])
+        response = self._release(old_mailbox)
 
         self.assertNotEqual(new_mailbox['claim_token'], old_mailbox['claim_token'])
         self.assertEqual(response.status_code, 409)

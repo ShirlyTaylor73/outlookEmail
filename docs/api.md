@@ -631,8 +631,8 @@ curl -X POST "http://localhost:5000/api/external/mailboxes/claim" \
 | --- | --- | --- | --- |
 | `claim_token` | string | 是 | `claim` 返回的领取 token |
 | `target_group_id` | int | 是 | 完成后移动到的目标分组 |
-| `resource_type` | string | 否 | `account` 或 `temp_email`；与 `resource_id` 同时传入时直接按资源校验，不传时由 `claim_token` 反查 |
-| `resource_id` | int | 否 | 资源 ID；与 `resource_type` 同时传入 |
+| `resource_type` | string | 是 | `account` 或 `temp_email`；必须与 `resource_id` 和 `claim_token` 同时校验 |
+| `resource_id` | int | 是 | 资源 ID；必须与 `resource_type` 和 `claim_token` 同时校验 |
 | `caller_id` | string | 否 | 调用方标识；不传时使用领取记录中的值 |
 | `task_id` | string | 否 | 外部任务标识；不传时使用领取记录中的值 |
 | `detail` | string | 否 | 结果备注，最多保留 500 字符 |
@@ -682,8 +682,8 @@ curl -X POST "http://localhost:5000/api/external/mailboxes/complete" \
 | 字段 | 类型 | 必填 | 说明 |
 | --- | --- | --- | --- |
 | `claim_token` | string | 是 | `claim` 返回的领取 token |
-| `resource_type` | string | 否 | `account` 或 `temp_email`；与 `resource_id` 同时传入时直接按资源校验，不传时由 `claim_token` 反查 |
-| `resource_id` | int | 否 | 资源 ID；与 `resource_type` 同时传入 |
+| `resource_type` | string | 是 | `account` 或 `temp_email`；必须与 `resource_id` 和 `claim_token` 同时校验 |
+| `resource_id` | int | 是 | 资源 ID；必须与 `resource_type` 和 `claim_token` 同时校验 |
 | `caller_id` | string | 否 | 调用方标识；不传时使用领取记录中的值 |
 | `task_id` | string | 否 | 外部任务标识；不传时使用领取记录中的值 |
 | `detail` | string | 否 | 释放备注，最多保留 500 字符 |
