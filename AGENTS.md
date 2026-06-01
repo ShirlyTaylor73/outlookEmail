@@ -60,6 +60,20 @@ When testing environment loading, set env vars before importing `web_outlook_app
 
 For public share or external API tests, use Flask test clients and mocked mail-provider helpers. Do not hit real Outlook/IMAP providers from pytest.
 
+After each complete implementation, run a real local HTTP end-to-end smoke test when the change affects runtime behavior, external APIs, sharing, authentication, database migrations, Docker/runtime startup, or frontend-to-backend flows. This is in addition to pytest and compile checks: start or reuse `python web_outlook_app.py`, call the running service on `http://127.0.0.1:5000`, use the configured external API key, and verify the behavior against the real local SQLite database. For the external mailbox API, use:
+
+```bash
+python scripts/e2e_external_api_smoke.py --api-key <external-api-key> --group-ids 1,2,49,50 --claim-group-id 49
+```
+
+If the local `.env` contains `EXTERNAL_API_KEY`, the `--api-key` argument can be omitted:
+
+```bash
+python scripts/e2e_external_api_smoke.py --group-ids 1,2,49,50 --claim-group-id 49
+```
+
+The smoke test should perform real HTTP requests such as `/api/external/accounts` and a safe `claim -> release` cycle. Do not hard-code real API keys in tracked files; pass them via command line, environment variables such as `OUTLOOK_EXTERNAL_API_KEY`, or the untracked local `.env`.
+
 ## Runtime, Sharing, and External API Notes
 
 `web_outlook_app.py` loads a project `.env` via `outlook_web.runtime.load_environment_file()` before segmented bootstrap. Keep this behavior early in the entrypoint, and do not override real environment variables with `.env` values.
