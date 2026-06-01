@@ -804,6 +804,529 @@ def api_external_get_accounts():
     })
 
 
+MAILBOX_CLAIM_TOKEN_PREFIX = 'mclm_'
+MAILBOX_CLAIM_DEFAULT_LEASE_SECONDS = 600
+MAILBOX_CLAIM_MAX_LEASE_SECONDS = 3600
+MAILBOX_CLAIM_TOKEN_RETRY_LIMIT = 5
+MAILBOX_CLAIM_STATUS_CLAIMING = 'claiming'
+MAILBOX_CLAIM_STATUS_EXPIRED = 'expired'
+MAILBOX_CLAIM_STATUS_COMPLETED = 'completed'
+MAILBOX_CLAIM_STATUS_RELEASED = 'released'
+
+
+class MailboxClaimError(Exception):
+    def __init__(self, message: str, status_code: int = 400):
+        super().__init__(message)
+        self.status_code = status_code
+
+
+def parse_mailbox_claim_lease_seconds(value) -> int:
+    if value in (None, ''):
+        return MAILBOX_CLAIM_DEFAULT_LEASE_SECONDS
+    try:
+        lease_seconds = int(value)
+    except (TypeError, ValueError):
+        raise ValueError('lease_seconds 必须为整数')
+    return max(1, min(lease_seconds, MAILBOX_CLAIM_MAX_LEASE_SECONDS))
+
+
+def get_mailbox_claim_now_str() -> str:
+    return datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
+
+
+def get_mailbox_claim_lease_expires_at(lease_seconds: int) -> str:
+    return (
+        datetime.now(timezone.utc) + timedelta(seconds=parse_mailbox_claim_lease_seconds(lease_seconds))
+    ).strftime('%Y-%m-%d %H:%M:%S')
+
+
+def normalize_mailbox_claim_resource_type(value: Any) -> str:
+    resource_type = str(value or '').strip().lower()
+    if resource_type in {MAILBOX_TYPE_ACCOUNT, MAILBOX_TYPE_TEMP_EMAIL}:
+        return resource_type
+    raise ValueError('resource_type 无效')
+
+
+def parse_mailbox_claim_int(value: Any, field_name: str) -> int:
+    if value in (None, ''):
+        raise ValueError(f'缺少 {field_name}')
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        raise ValueError(f'{field_name} 必须为整数')
+    if parsed <= 0:
+        raise ValueError(f'{field_name} 必须为正整数')
+    return parsed
+
+
+def generate_mailbox_claim_token() -> str:
+    return MAILBOX_CLAIM_TOKEN_PREFIX + secrets.token_urlsafe(24)
+
+
+def serialize_claimed_mailbox(resource_type: str, row, claim_token: str,
+                              lease_expires_at: str, source_group_id: int) -> Dict[str, Any]:
+    return {
+        'resource_type': resource_type,
+        'resource_id': int(row['id']),
+        'id': int(row['id']),
+        'email': row['email'],
+        'status': row['status'],
+        'provider': row['provider'] if 'provider' in row.keys() else '',
+        'account_type': row['account_type'] if 'account_type' in row.keys() else '',
+        'group_id': row['group_id'],
+        'source_group_id': source_group_id,
+        'claim_token': claim_token,
+        'lease_expires_at': lease_expires_at,
+        'created_at': row['created_at'] if 'created_at' in row.keys() else '',
+        'updated_at': row['updated_at'] if 'updated_at' in row.keys() else '',
+    }
+
+
+def expire_stale_mailbox_claims(db, now_str: str) -> int:
+    cursor = db.execute(
+        '''
+        UPDATE mailbox_claims
+        SET status = ?,
+            updated_at = ?
+        WHERE status = ?
+          AND datetime(lease_expires_at) <= datetime(?)
+        ''',
+        (
+            MAILBOX_CLAIM_STATUS_EXPIRED,
+            now_str,
+            MAILBOX_CLAIM_STATUS_CLAIMING,
+            now_str,
+        )
+    )
+    return cursor.rowcount
+
+
+def get_mailbox_claim_group(db, group_id: int):
+    return db.execute('SELECT * FROM groups WHERE id = ?', (group_id,)).fetchone()
+
+
+def get_mailbox_claim_resource(db, resource_type: str, resource_id: int):
+    if resource_type == MAILBOX_TYPE_TEMP_EMAIL:
+        return db.execute(
+            '''
+            SELECT id, email, status, provider, group_id, created_at, updated_at
+            FROM temp_emails
+            WHERE id = ?
+            ''',
+            (resource_id,)
+        ).fetchone()
+    return db.execute(
+        '''
+        SELECT id, email, status, provider, account_type, group_id, created_at, updated_at
+        FROM accounts
+        WHERE id = ?
+        ''',
+        (resource_id,)
+    ).fetchone()
+
+
+def get_mailbox_claim_by_token(claim_token: str):
+    token = str(claim_token or '').strip()
+    if not token:
+        return None
+    return get_db().execute(
+        '''
+        SELECT *
+        FROM mailbox_claims
+        WHERE claim_token = ?
+        ORDER BY id DESC
+        LIMIT 1
+        ''',
+        (token,)
+    ).fetchone()
+
+
+def claim_external_mailbox(source_group_id, caller_id: str, task_id: str,
+                           lease_seconds: int = MAILBOX_CLAIM_DEFAULT_LEASE_SECONDS):
+    source_group_id = parse_mailbox_claim_int(source_group_id, 'source_group_id')
+    caller_id = str(caller_id or '').strip()
+    task_id = str(task_id or '').strip()
+    if not caller_id:
+        raise ValueError('缺少 caller_id')
+    if not task_id:
+        raise ValueError('缺少 task_id')
+
+    lease_seconds = parse_mailbox_claim_lease_seconds(lease_seconds)
+    now_str = get_mailbox_claim_now_str()
+    lease_expires_at = (
+        datetime.now(timezone.utc) + timedelta(seconds=lease_seconds)
+    ).strftime('%Y-%m-%d %H:%M:%S')
+    db = get_db()
+
+    try:
+        db.execute('BEGIN IMMEDIATE')
+        expire_stale_mailbox_claims(db, now_str)
+
+        source_group = get_mailbox_claim_group(db, source_group_id)
+        if not source_group:
+            db.rollback()
+            raise MailboxClaimError('源分组不存在', 404)
+
+        resource_type = normalize_mailbox_type(source_group['mailbox_type'])
+        if resource_type == MAILBOX_TYPE_TEMP_EMAIL:
+            row = db.execute(
+                '''
+                SELECT id, email, status, provider, group_id, created_at, updated_at
+                FROM temp_emails
+                WHERE group_id = ?
+                  AND status = 'active'
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM mailbox_claims mc
+                      WHERE mc.resource_type = ?
+                        AND mc.resource_id = temp_emails.id
+                        AND mc.status = ?
+                  )
+                ORDER BY id ASC
+                LIMIT 1
+                ''',
+                (source_group_id, resource_type, MAILBOX_CLAIM_STATUS_CLAIMING)
+            ).fetchone()
+        else:
+            row = db.execute(
+                '''
+                SELECT id, email, status, provider, account_type, group_id, created_at, updated_at
+                FROM accounts
+                WHERE group_id = ?
+                  AND status = 'active'
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM mailbox_claims mc
+                      WHERE mc.resource_type = ?
+                        AND mc.resource_id = accounts.id
+                        AND mc.status = ?
+                  )
+                ORDER BY id ASC
+                LIMIT 1
+                ''',
+                (source_group_id, resource_type, MAILBOX_CLAIM_STATUS_CLAIMING)
+            ).fetchone()
+
+        if not row:
+            db.commit()
+            return None
+
+        for _ in range(MAILBOX_CLAIM_TOKEN_RETRY_LIMIT):
+            claim_token = generate_mailbox_claim_token()
+            try:
+                db.execute(
+                    '''
+                    INSERT INTO mailbox_claims (
+                        resource_type, resource_id, source_group_id, claim_token,
+                        caller_id, task_id, status, lease_expires_at, result_detail,
+                        created_at, updated_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, '', ?, ?)
+                    ''',
+                    (
+                        resource_type,
+                        int(row['id']),
+                        source_group_id,
+                        claim_token,
+                        caller_id,
+                        task_id,
+                        MAILBOX_CLAIM_STATUS_CLAIMING,
+                        lease_expires_at,
+                        now_str,
+                        now_str,
+                    )
+                )
+                db.commit()
+                return serialize_claimed_mailbox(
+                    resource_type,
+                    row,
+                    claim_token,
+                    lease_expires_at,
+                    source_group_id,
+                )
+            except sqlite3.IntegrityError:
+                continue
+
+        db.rollback()
+        raise MailboxClaimError('生成领取 token 失败', 409)
+    except Exception:
+        if db.in_transaction:
+            db.rollback()
+        raise
+
+
+def complete_external_mailbox_claim(resource_type, resource_id, claim_token: str,
+                                    target_group_id, caller_id: str = '',
+                                    task_id: str = '', detail: str = '') -> bool:
+    resource_type = normalize_mailbox_claim_resource_type(resource_type)
+    resource_id = parse_mailbox_claim_int(resource_id, 'resource_id')
+    target_group_id = parse_mailbox_claim_int(target_group_id, 'target_group_id')
+    claim_token = str(claim_token or '').strip()
+    if not claim_token:
+        raise ValueError('缺少 claim_token')
+
+    db = get_db()
+    now_str = get_mailbox_claim_now_str()
+    detail = sanitize_input(str(detail or ''), max_length=500)
+
+    try:
+        db.execute('BEGIN IMMEDIATE')
+        expire_stale_mailbox_claims(db, now_str)
+        claim = db.execute(
+            '''
+            SELECT *
+            FROM mailbox_claims
+            WHERE resource_type = ?
+              AND resource_id = ?
+              AND claim_token = ?
+              AND status IN (?, ?)
+            ORDER BY id DESC
+            LIMIT 1
+            ''',
+            (
+                resource_type,
+                resource_id,
+                claim_token,
+                MAILBOX_CLAIM_STATUS_CLAIMING,
+                MAILBOX_CLAIM_STATUS_EXPIRED,
+            )
+        ).fetchone()
+        if not claim:
+            db.rollback()
+            return False
+
+        other_claiming = db.execute(
+            '''
+            SELECT id
+            FROM mailbox_claims
+            WHERE resource_type = ?
+              AND resource_id = ?
+              AND status = ?
+              AND claim_token != ?
+            LIMIT 1
+            ''',
+            (resource_type, resource_id, MAILBOX_CLAIM_STATUS_CLAIMING, claim_token)
+        ).fetchone()
+        if other_claiming:
+            db.rollback()
+            return False
+
+        target_group = get_mailbox_claim_group(db, target_group_id)
+        if not target_group:
+            db.rollback()
+            raise MailboxClaimError('目标分组不存在', 404)
+        if normalize_mailbox_type(target_group['mailbox_type']) != resource_type:
+            db.rollback()
+            raise ValueError('目标分组类型不匹配')
+
+        resource = get_mailbox_claim_resource(db, resource_type, resource_id)
+        if not resource:
+            db.rollback()
+            raise MailboxClaimError('邮箱资源不存在', 404)
+
+        if resource_type == MAILBOX_TYPE_TEMP_EMAIL:
+            db.execute(
+                'UPDATE temp_emails SET group_id = ?, updated_at = ? WHERE id = ?',
+                (target_group_id, now_str, resource_id)
+            )
+        else:
+            db.execute(
+                'UPDATE accounts SET group_id = ?, updated_at = ? WHERE id = ?',
+                (target_group_id, now_str, resource_id)
+            )
+
+        db.execute(
+            '''
+            UPDATE mailbox_claims
+            SET status = ?,
+                target_group_id = ?,
+                result_detail = ?,
+                completed_at = ?,
+                updated_at = ?
+            WHERE id = ?
+            ''',
+            (
+                MAILBOX_CLAIM_STATUS_COMPLETED,
+                target_group_id,
+                detail,
+                now_str,
+                now_str,
+                int(claim['id']),
+            )
+        )
+        db.commit()
+        return True
+    except Exception:
+        if db.in_transaction:
+            db.rollback()
+        raise
+
+
+def release_external_mailbox_claim(resource_type, resource_id, claim_token: str,
+                                   caller_id: str = '', task_id: str = '',
+                                   detail: str = '') -> bool:
+    resource_type = normalize_mailbox_claim_resource_type(resource_type)
+    resource_id = parse_mailbox_claim_int(resource_id, 'resource_id')
+    claim_token = str(claim_token or '').strip()
+    if not claim_token:
+        raise ValueError('缺少 claim_token')
+
+    db = get_db()
+    now_str = get_mailbox_claim_now_str()
+    detail = sanitize_input(str(detail or ''), max_length=500)
+
+    try:
+        db.execute('BEGIN IMMEDIATE')
+        expire_stale_mailbox_claims(db, now_str)
+        claim = db.execute(
+            '''
+            SELECT *
+            FROM mailbox_claims
+            WHERE resource_type = ?
+              AND resource_id = ?
+              AND claim_token = ?
+              AND status = ?
+            ORDER BY id DESC
+            LIMIT 1
+            ''',
+            (resource_type, resource_id, claim_token, MAILBOX_CLAIM_STATUS_CLAIMING)
+        ).fetchone()
+        if not claim:
+            db.rollback()
+            return False
+
+        db.execute(
+            '''
+            UPDATE mailbox_claims
+            SET status = ?,
+                result_detail = ?,
+                updated_at = ?
+            WHERE id = ?
+            ''',
+            (
+                MAILBOX_CLAIM_STATUS_RELEASED,
+                detail,
+                now_str,
+                int(claim['id']),
+            )
+        )
+        db.commit()
+        return True
+    except Exception:
+        if db.in_transaction:
+            db.rollback()
+        raise
+
+
+def mailbox_claim_json_error(message: str, status_code: int):
+    return jsonify({'success': False, 'error': message}), status_code
+
+
+def resolve_mailbox_claim_resource_from_payload(data: Dict[str, Any], claim_token: str):
+    resource_type = data.get('resource_type')
+    resource_id = data.get('resource_id')
+    if resource_type not in (None, '') and resource_id not in (None, ''):
+        return normalize_mailbox_claim_resource_type(resource_type), parse_mailbox_claim_int(resource_id, 'resource_id'), None
+
+    claim = get_mailbox_claim_by_token(claim_token)
+    if not claim:
+        return None, None, None
+    return claim['resource_type'], int(claim['resource_id']), claim
+
+
+@app.route('/api/external/mailboxes/claim', methods=['POST'])
+@csrf_exempt
+@api_key_required
+def api_external_claim_mailbox():
+    data = request.get_json(silent=True) or {}
+    try:
+        source_group_id = parse_mailbox_claim_int(data.get('source_group_id'), 'source_group_id')
+        caller_id = str(data.get('caller_id') or '').strip()
+        task_id = str(data.get('task_id') or '').strip()
+        if not caller_id:
+            return mailbox_claim_json_error('缺少 caller_id', 400)
+        if not task_id:
+            return mailbox_claim_json_error('缺少 task_id', 400)
+        lease_seconds = parse_mailbox_claim_lease_seconds(data.get('lease_seconds'))
+        mailbox = claim_external_mailbox(source_group_id, caller_id, task_id, lease_seconds)
+        return jsonify({'success': True, 'mailbox': mailbox})
+    except MailboxClaimError as exc:
+        return mailbox_claim_json_error(str(exc), exc.status_code)
+    except ValueError as exc:
+        return mailbox_claim_json_error(str(exc), 400)
+
+
+@app.route('/api/external/mailboxes/complete', methods=['POST'])
+@csrf_exempt
+@api_key_required
+def api_external_complete_mailbox_claim():
+    data = request.get_json(silent=True) or {}
+    claim_token = str(data.get('claim_token') or '').strip()
+    if not claim_token:
+        return mailbox_claim_json_error('缺少 claim_token', 400)
+    try:
+        target_group_id = parse_mailbox_claim_int(data.get('target_group_id'), 'target_group_id')
+        resource_type, resource_id, claim = resolve_mailbox_claim_resource_from_payload(data, claim_token)
+        if not resource_type or not resource_id:
+            return mailbox_claim_json_error('领取 token 状态冲突', 409)
+        caller_id = str(data.get('caller_id') or (claim['caller_id'] if claim else '') or '').strip()
+        task_id = str(data.get('task_id') or (claim['task_id'] if claim else '') or '').strip()
+        detail = data.get('detail', '')
+        completed = complete_external_mailbox_claim(
+            resource_type,
+            resource_id,
+            claim_token,
+            target_group_id,
+            caller_id,
+            task_id,
+            detail,
+        )
+        if not completed:
+            return mailbox_claim_json_error('领取 token 状态冲突', 409)
+        return jsonify({'success': True})
+    except MailboxClaimError as exc:
+        return mailbox_claim_json_error(str(exc), exc.status_code)
+    except ValueError as exc:
+        return mailbox_claim_json_error(str(exc), 400)
+
+
+@app.route('/api/external/mailboxes/release', methods=['POST'])
+@csrf_exempt
+@api_key_required
+def api_external_release_mailbox_claim():
+    data = request.get_json(silent=True) or {}
+    claim_token = str(data.get('claim_token') or '').strip()
+    if not claim_token:
+        return mailbox_claim_json_error('缺少 claim_token', 400)
+    try:
+        resource_type, resource_id, claim = resolve_mailbox_claim_resource_from_payload(data, claim_token)
+        if not resource_type or not resource_id:
+            return mailbox_claim_json_error('领取 token 状态冲突', 409)
+        caller_id = str(data.get('caller_id') or (claim['caller_id'] if claim else '') or '').strip()
+        task_id = str(data.get('task_id') or (claim['task_id'] if claim else '') or '').strip()
+        detail = data.get('detail', '')
+        released = release_external_mailbox_claim(
+            resource_type,
+            resource_id,
+            claim_token,
+            caller_id,
+            task_id,
+            detail,
+        )
+        if not released:
+            return mailbox_claim_json_error('领取 token 状态冲突', 409)
+        return jsonify({'success': True})
+    except MailboxClaimError as exc:
+        return mailbox_claim_json_error(str(exc), exc.status_code)
+    except ValueError as exc:
+        return mailbox_claim_json_error(str(exc), 400)
+
+
+assert_endpoint_protection('api_external_claim_mailbox', '_requires_api_key', 'api_key_required')
+assert_endpoint_protection('api_external_complete_mailbox_claim', '_requires_api_key', 'api_key_required')
+assert_endpoint_protection('api_external_release_mailbox_claim', '_requires_api_key', 'api_key_required')
+
+
 # ==================== 项目 API ====================
 
 @app.route('/api/projects', methods=['GET'])

@@ -1096,6 +1096,25 @@ def init_db():
         )
     ''')
 
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS mailbox_claims (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            resource_type TEXT NOT NULL,
+            resource_id INTEGER NOT NULL,
+            source_group_id INTEGER NOT NULL,
+            target_group_id INTEGER,
+            claim_token TEXT NOT NULL UNIQUE,
+            caller_id TEXT NOT NULL,
+            task_id TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'claiming',
+            lease_expires_at TIMESTAMP NOT NULL,
+            result_detail TEXT DEFAULT '',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            completed_at TIMESTAMP
+        )
+    ''')
+
     account_share_fk_rows = cursor.execute('PRAGMA foreign_key_list(account_shares)').fetchall()
     account_share_fk = next(
         (row for row in account_share_fk_rows if row[2] == 'accounts' and row[3] == 'account_id'),
@@ -1951,6 +1970,16 @@ def init_db():
     cursor.execute('''
         CREATE INDEX IF NOT EXISTS idx_account_shares_token
         ON account_shares(token)
+    ''')
+
+    cursor.execute('''
+        CREATE INDEX IF NOT EXISTS idx_mailbox_claims_resource_status
+        ON mailbox_claims(resource_type, resource_id, status)
+    ''')
+
+    cursor.execute('''
+        CREATE INDEX IF NOT EXISTS idx_mailbox_claims_status_lease
+        ON mailbox_claims(status, lease_expires_at)
     ''')
 
     cursor.execute('''
