@@ -10,23 +10,24 @@
         // 加载临时邮箱列表
         async function loadTempEmails(forceRefresh = false) {
             const container = document.getElementById('accountList');
+            const cacheKey = `temp:${currentGroupId}`;
 
-            if (!forceRefresh && accountsCache['temp']) {
-                renderTempEmailList(accountsCache['temp']);
+            if (!forceRefresh && accountsCache[cacheKey]) {
+                renderTempEmailList(accountsCache[cacheKey]);
                 return;
             }
 
             container.innerHTML = '<div class="loading loading-small"><div class="loading-spinner"></div></div>';
 
             try {
-                const response = await fetch('/api/temp-emails');
+                const response = await fetch(`/api/temp-emails?group_id=${encodeURIComponent(currentGroupId || '')}`);
                 const data = await response.json();
 
                 if (data.success) {
-                    accountsCache['temp'] = data.emails;
+                    accountsCache[cacheKey] = data.emails;
                     renderTempEmailList(data.emails);
 
-                    const group = groups.find(g => g.name === '临时邮箱');
+                    const group = groups.find(g => g.id === currentGroupId);
                     if (group) {
                         group.account_count = data.emails.length;
                         renderGroupList(groups);
@@ -633,7 +634,7 @@
             btn.textContent = '⏳ 创建中...';
 
             try {
-                let body = { provider };
+                let body = { provider, group_id: currentGroupId };
 
                 if (provider === 'duckmail') {
                     body.domain = document.getElementById('duckmailDomain').value;
@@ -677,7 +678,7 @@
                 if (data.success) {
                     showToast(`临时邮箱已生成: ${data.email}`, 'success');
                     hideModal('tempEmailProviderModal');
-                    delete accountsCache['temp'];
+                    delete accountsCache[`temp:${currentGroupId}`];
                     loadTempEmails(true);
                     loadGroups();
                 } else {
@@ -1043,7 +1044,7 @@
 
                 if (data.success) {
                     showToast('临时邮箱已删除', 'success');
-                    delete accountsCache['temp'];
+                    delete accountsCache[`temp:${currentGroupId}`];
 
                     if (currentAccount === email) {
                         currentAccount = null;

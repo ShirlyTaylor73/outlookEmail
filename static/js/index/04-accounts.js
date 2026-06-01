@@ -1,4 +1,4 @@
-        /* global accountsCache, applyEmailListCache, closeMobilePanels, currentAccount, currentEmailDetail, currentEmailId, currentEmails, currentFolder, currentGroupId, currentMethod, currentSkip, emailListCache, getEmailListCacheEntry, getNextEmailSkipFromCache, handleApiError, hasMoreEmails, hideModal, isTempEmailGroup, loadAccountsByGroup, loadEmails, loadGroups, renderEmailList, scheduleEmailListLoadCheck, setModalVisible, showEmailList, showToast, updateImportHint, updateMobileContext */
+        /* global accountsCache, applyEmailListCache, closeMobilePanels, currentAccount, currentEmailDetail, currentEmailId, currentEmails, currentFolder, currentGroupId, currentMethod, currentSkip, emailListCache, getEmailListCacheEntry, getNextEmailSkipFromCache, handleApiError, hasMoreEmails, hideModal, isTempEmailGroup, isTempMailboxGroup, loadAccountsByGroup, loadEmails, loadGroups, renderEmailList, scheduleEmailListLoadCheck, setModalVisible, showEmailList, showToast, updateImportHint, updateMobileContext */
 
         // ==================== 账号相关 ====================
 
@@ -93,7 +93,7 @@
 
             // 检查是否是临时邮箱分组
             const selectedGroup = groups.find(g => g.id === groupId);
-            const isTempGroup = selectedGroup && selectedGroup.name === '临时邮箱';
+            const isTempGroup = selectedGroup && isTempMailboxGroup(selectedGroup);
 
             try {
                 let response;
@@ -103,7 +103,7 @@
                     response = await fetch('/api/temp-emails/import', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ account_string: input, provider: provider })
+                        body: JSON.stringify({ account_string: input, provider: provider, group_id: groupId })
                     });
                 } else {
                     response = await fetch('/api/accounts', {

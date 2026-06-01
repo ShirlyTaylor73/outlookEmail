@@ -19,6 +19,11 @@ if ROOT_DIR not in sys.path:
 web_outlook_app = importlib.import_module('web_outlook_app')
 
 
+def _read_project_text(relative_path):
+    with open(os.path.join(ROOT_DIR, relative_path), encoding='utf-8') as handle:
+        return handle.read()
+
+
 class TempEmailGroupTests(unittest.TestCase):
     def setUp(self):
         self.app = web_outlook_app.app
@@ -289,6 +294,21 @@ class TempEmailGroupTests(unittest.TestCase):
                 [custom_group['id'], temp_group['id'], account_group['id']],
                 [row['id'] for row in rows]
             )
+
+    def test_frontend_temp_email_group_static_contracts(self):
+        dialogs_html = _read_project_text('templates/partials/index/dialogs-primary.html')
+        groups_js = _read_project_text('static/js/index/02-groups.js')
+        temp_emails_js = _read_project_text('static/js/index/03-temp-emails.js')
+        accounts_js = _read_project_text('static/js/index/04-accounts.js')
+        settings_js = _read_project_text('static/js/index/07-settings.js')
+
+        self.assertIn('groupMailboxType', dialogs_html)
+        self.assertIn('isTempMailboxGroup', groups_js)
+        self.assertIn('mailbox_type', groups_js)
+        self.assertIn('group_id', temp_emails_js)
+        self.assertIn('/api/temp-emails?', temp_emails_js)
+        self.assertIn('group_id', accounts_js)
+        self.assertIn('group_id', settings_js)
 
 
 if __name__ == '__main__':
