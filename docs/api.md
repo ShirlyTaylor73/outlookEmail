@@ -717,6 +717,7 @@ curl -X POST "http://localhost:5000/api/external/mailboxes/release" \
 | 缺少 `claim_token` | `400` | `{"success": false, "error": "缺少 claim_token"}` |
 | 非法 `resource_id` | `400` | `{"success": false, "error": "resource_id 必须为正整数"}` |
 | `resource_type` 无效 | `400` | `{"success": false, "error": "resource_type 无效"}` |
+| 邮箱资源不存在 | `404` | `{"success": false, "error": "邮箱资源不存在"}` |
 | token 不存在、已过期、已完成、已释放，或资源已被其他有效领取占用 | `409` | `{"success": false, "error": "领取 token 状态冲突"}` |
 
 #### 状态机说明
