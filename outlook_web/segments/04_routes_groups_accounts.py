@@ -223,17 +223,15 @@ def get_csrf_token():
 def api_get_groups():
     """获取所有分组"""
     groups = load_groups()
-    movable_position = 1
-    # 添加每个分组的邮箱数量
+    movable_ids = get_movable_group_ids()
     for group in groups:
-        if group['name'] == '临时邮箱':
-            # 临时邮箱分组从 temp_emails 表获取数量
-            group['account_count'] = get_temp_email_count()
-            group['sort_position'] = None
+        mailbox_type = normalize_mailbox_type(group.get('mailbox_type'))
+        group['mailbox_type'] = mailbox_type
+        if mailbox_type == MAILBOX_TYPE_TEMP_EMAIL:
+            group['account_count'] = get_temp_email_count(group['id'])
         else:
             group['account_count'] = get_group_account_count(group['id'])
-            group['sort_position'] = movable_position
-            movable_position += 1
+        group['sort_position'] = movable_ids.index(group['id']) + 1 if group['id'] in movable_ids else None
     return jsonify({'success': True, 'groups': groups})
 
 
@@ -244,7 +242,11 @@ def api_get_group(group_id):
     group = get_group_by_id(group_id)
     if not group:
         return jsonify({'success': False, 'error': '分组不存在'})
-    group['account_count'] = get_group_account_count(group_id)
+    group['mailbox_type'] = normalize_mailbox_type(group.get('mailbox_type'))
+    if group['mailbox_type'] == MAILBOX_TYPE_TEMP_EMAIL:
+        group['account_count'] = get_temp_email_count(group_id)
+    else:
+        group['account_count'] = get_group_account_count(group_id)
     group['sort_position'] = get_group_sort_position(group_id)
     return jsonify({'success': True, 'group': group})
 
@@ -261,6 +263,7 @@ def api_add_group():
     fallback_proxy_url_1 = data.get('fallback_proxy_url_1', '').strip()
     fallback_proxy_url_2 = data.get('fallback_proxy_url_2', '').strip()
     sort_position_raw = data.get('sort_position')
+    mailbox_type = normalize_mailbox_type(data.get('mailbox_type'))
 
     if not name:
         return jsonify({'success': False, 'error': '分组名称不能为空'})
@@ -270,7 +273,10 @@ def api_add_group():
     except (TypeError, ValueError):
         return jsonify({'success': False, 'error': '排序位置无效'})
 
-    group_id = add_group(name, description, color, proxy_url, fallback_proxy_url_1, fallback_proxy_url_2, sort_position)
+    group_id = add_group(
+        name, description, color, proxy_url, fallback_proxy_url_1,
+        fallback_proxy_url_2, sort_position, mailbox_type=mailbox_type,
+    )
     if group_id:
         return jsonify({'success': True, 'message': '分组创建成功', 'group_id': group_id})
     else:
@@ -289,6 +295,7 @@ def api_update_group(group_id):
     fallback_proxy_url_1 = data.get('fallback_proxy_url_1', '').strip()
     fallback_proxy_url_2 = data.get('fallback_proxy_url_2', '').strip()
     sort_position_raw = data.get('sort_position')
+    mailbox_type = data.get('mailbox_type') if 'mailbox_type' in data else None
 
     if not name:
         return jsonify({'success': False, 'error': '分组名称不能为空'})
@@ -298,10 +305,13 @@ def api_update_group(group_id):
     except (TypeError, ValueError):
         return jsonify({'success': False, 'error': '排序位置无效'})
 
-    if update_group(group_id, name, description, color, proxy_url, fallback_proxy_url_1, fallback_proxy_url_2, sort_position):
+    if update_group(
+        group_id, name, description, color, proxy_url, fallback_proxy_url_1,
+        fallback_proxy_url_2, sort_position, mailbox_type=mailbox_type,
+    ):
         return jsonify({'success': True, 'message': '分组更新成功'})
     else:
-        return jsonify({'success': False, 'error': '更新失败'})
+        return jsonify({'success': False, 'error': '更新失败'}), 400
 
 
 @app.route('/api/groups/<int:group_id>', methods=['DELETE'])
@@ -309,12 +319,12 @@ def api_update_group(group_id):
 def api_delete_group(group_id):
     """删除分组"""
     if group_id == 1:
-        return jsonify({'success': False, 'error': '默认分组不能删除'})
+        return jsonify({'success': False, 'error': '默认分组不能删除'}), 400
     
     if delete_group(group_id):
         return jsonify({'success': True, 'message': '分组已删除，邮箱已移至默认分组'})
     else:
-        return jsonify({'success': False, 'error': '删除失败'})
+        return jsonify({'success': False, 'error': '删除失败'}), 400
 
 
 @app.route('/api/groups/reorder', methods=['PUT'])
@@ -356,11 +366,11 @@ def api_export_group(group_id):
         return jsonify({'success': False, 'error': '分组不存在'})
 
     lines = []
-    is_temp_group = group['name'] == '临时邮箱'
+    is_temp_group = normalize_mailbox_type(group.get('mailbox_type')) == MAILBOX_TYPE_TEMP_EMAIL
 
     if is_temp_group:
         # 临时邮箱分组从 temp_emails 表获取数据
-        temp_emails = load_temp_emails()
+        temp_emails = load_temp_emails(group_id)
         if not temp_emails:
             return jsonify({'success': False, 'error': '该分组下没有临时邮箱'})
 
@@ -438,8 +448,8 @@ def build_group_export_content(group_ids: List[int]) -> Dict[str, Any]:
         if not group:
             continue
 
-        if group['name'] == '临时邮箱':
-            temp_emails = load_temp_emails()
+        if normalize_mailbox_type(group.get('mailbox_type')) == MAILBOX_TYPE_TEMP_EMAIL:
+            temp_emails = load_temp_emails(group_id)
             if not temp_emails:
                 continue
 
@@ -1059,9 +1069,8 @@ def api_batch_update_account_group():
     if not group:
         return jsonify({'success': False, 'error': '目标分组不存在'})
 
-    # 检查是否是临时邮箱分组（系统保留分组）
-    if group.get('is_system'):
-        return jsonify({'success': False, 'error': '不能移动到系统分组'})
+    if normalize_mailbox_type(group.get('mailbox_type')) != MAILBOX_TYPE_ACCOUNT:
+        return jsonify({'success': False, 'error': '账号只能移动到普通邮箱分组'}), 400
 
     # 批量更新
     db = get_db()

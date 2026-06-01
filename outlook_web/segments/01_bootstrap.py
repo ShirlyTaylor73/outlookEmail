@@ -507,9 +507,6 @@ CLOUDFLARE_WORKER_DOMAIN = os.getenv("CLOUDFLARE_WORKER_DOMAIN") or os.getenv("W
 CLOUDFLARE_EMAIL_DOMAINS = os.getenv("CLOUDFLARE_EMAIL_DOMAINS") or os.getenv("EMAIL_DOMAIN", "")
 CLOUDFLARE_ADMIN_PASSWORD = os.getenv("CLOUDFLARE_ADMIN_PASSWORD") or os.getenv("ADMIN_PASSWORD", "")
 
-# 临时邮箱分组 ID（系统保留）
-TEMP_EMAIL_GROUP_ID = -1
-
 # 导出验证 Token 存储（内存存储，单 worker 模式下使用）
 # 格式: {user_session_id: {'token': verify_token, 'expires': timestamp}}
 export_verify_tokens = {}
@@ -979,9 +976,7 @@ def normalize_group_sort_orders_on_startup(cursor) -> None:
         SELECT id, name, sort_order
         FROM groups
         ORDER BY
-            CASE WHEN name = '临时邮箱' THEN 0 ELSE 1 END,
             CASE
-                WHEN name = '临时邮箱' THEN 0
                 WHEN COALESCE(sort_order, 0) > 0 THEN sort_order
                 ELSE 2147483647
             END,
@@ -992,9 +987,8 @@ def normalize_group_sort_orders_on_startup(cursor) -> None:
 
     next_sort_order = 1
     for group_id, group_name, sort_order in group_rows:
-        target_sort_order = 0 if group_name == '临时邮箱' else next_sort_order
-        if group_name != '临时邮箱':
-            next_sort_order += 1
+        target_sort_order = next_sort_order
+        next_sort_order += 1
         if sort_order != target_sort_order:
             cursor.execute(
                 'UPDATE groups SET sort_order = ? WHERE id = ?',
@@ -1024,6 +1018,7 @@ def init_db():
             name TEXT UNIQUE NOT NULL,
             description TEXT,
             color TEXT DEFAULT '#1a1a1a',
+            mailbox_type TEXT DEFAULT 'account',
             sort_order INTEGER DEFAULT 0,
             is_system INTEGER DEFAULT 0,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -1068,8 +1063,10 @@ def init_db():
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             email TEXT UNIQUE NOT NULL,
             status TEXT DEFAULT 'active',
+            group_id INTEGER,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (group_id) REFERENCES groups (id)
         )
     ''')
 
@@ -1451,6 +1448,8 @@ def init_db():
         cursor.execute('ALTER TABLE groups ADD COLUMN fallback_proxy_url_1 TEXT')
     if 'fallback_proxy_url_2' not in group_columns:
         cursor.execute('ALTER TABLE groups ADD COLUMN fallback_proxy_url_2 TEXT')
+    if 'mailbox_type' not in group_columns:
+        cursor.execute("ALTER TABLE groups ADD COLUMN mailbox_type TEXT DEFAULT 'account'")
 
     # 检查 temp_emails 表是否有 DuckMail 相关列
     cursor.execute("PRAGMA table_info(temp_emails)")
@@ -1467,6 +1466,8 @@ def init_db():
         cursor.execute('ALTER TABLE temp_emails ADD COLUMN cloudflare_jwt TEXT')
     if 'cloudflare_address_id' not in temp_columns:
         cursor.execute('ALTER TABLE temp_emails ADD COLUMN cloudflare_address_id TEXT')
+    if 'group_id' not in temp_columns:
+        cursor.execute('ALTER TABLE temp_emails ADD COLUMN group_id INTEGER')
 
     cursor.execute("PRAGMA table_info(retained_normal_mail_messages)")
     retained_normal_mail_columns = {row[1] for row in cursor.fetchall()}
@@ -1549,17 +1550,46 @@ def init_db():
     
     # 创建默认分组
     cursor.execute('''
-        INSERT OR IGNORE INTO groups (name, description, color)
-        VALUES ('默认分组', '未分组的邮箱', '#666666')
+        INSERT OR IGNORE INTO groups (name, description, color, mailbox_type)
+        VALUES ('默认分组', '未分组的邮箱', '#666666', 'account')
     ''')
     
     # 创建临时邮箱分组（系统分组）
     cursor.execute('''
-        INSERT OR IGNORE INTO groups (name, description, color, is_system)
-        VALUES ('临时邮箱', 'GPTMail 临时邮箱服务', '#00bcf2', 1)
+        INSERT OR IGNORE INTO groups (name, description, color, mailbox_type, is_system)
+        VALUES ('临时邮箱', 'GPTMail 临时邮箱服务', '#00bcf2', 'temp_email', 1)
+    ''')
+    cursor.execute('''
+        UPDATE groups
+        SET mailbox_type = 'account'
+        WHERE name = '默认分组'
+          AND (mailbox_type IS NULL OR mailbox_type != 'account')
+    ''')
+    cursor.execute('''
+        UPDATE groups
+        SET mailbox_type = 'temp_email', is_system = 1
+        WHERE name = '临时邮箱'
+    ''')
+    cursor.execute('''
+        UPDATE groups
+        SET mailbox_type = 'account'
+        WHERE mailbox_type IS NULL OR mailbox_type NOT IN ('account', 'temp_email')
     ''')
 
-    # 归一化分组排序值，临时邮箱固定在最前，其他分组保留已有相对顺序。
+    default_temp_group = cursor.execute(
+        "SELECT id FROM groups WHERE name = '临时邮箱' AND mailbox_type = 'temp_email' LIMIT 1"
+    ).fetchone()
+    if default_temp_group:
+        cursor.execute(
+            '''
+            UPDATE temp_emails
+            SET group_id = ?
+            WHERE group_id IS NULL
+            ''',
+            (default_temp_group[0],)
+        )
+
+    # 归一化分组排序值，保留已有自定义相对顺序。
     normalize_group_sort_orders_on_startup(cursor)
     
     # 初始化默认设置
@@ -1794,6 +1824,11 @@ def init_db():
     cursor.execute('''
         CREATE INDEX IF NOT EXISTS idx_accounts_group_created
         ON accounts(group_id, created_at)
+    ''')
+
+    cursor.execute('''
+        CREATE INDEX IF NOT EXISTS idx_temp_emails_group_created
+        ON temp_emails(group_id, created_at)
     ''')
 
     cursor.execute('''
