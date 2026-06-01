@@ -388,6 +388,18 @@ class ExternalMailboxClaimTests(unittest.TestCase):
         self.assertEqual(missing_type.status_code, 400)
         self.assertEqual(missing_id.status_code, 400)
 
+    def test_release_returns_404_when_resource_deleted(self):
+        self._insert_account('deleted-before-release@example.com', self.account_group_id)
+        mailbox = self._mailbox(self._claim(self.account_group_id))
+        with self.app.app_context():
+            db = web_outlook_app.get_db()
+            db.execute('DELETE FROM accounts WHERE id = ?', (mailbox['resource_id'],))
+            db.commit()
+
+        response = self._release(mailbox)
+
+        self.assertEqual(response.status_code, 404)
+
     def test_complete_account_moves_to_account_target_group(self):
         account_id = self._insert_account('complete@example.com', self.account_group_id)
         mailbox = self._mailbox(self._claim(self.account_group_id))

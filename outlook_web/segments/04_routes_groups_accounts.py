@@ -1171,6 +1171,11 @@ def release_external_mailbox_claim(resource_type, resource_id, claim_token: str,
             db.rollback()
             return False
 
+        resource = get_mailbox_claim_resource(db, resource_type, resource_id)
+        if not resource:
+            db.rollback()
+            raise MailboxClaimError('邮箱资源不存在', 404)
+
         db.execute(
             '''
             UPDATE mailbox_claims
