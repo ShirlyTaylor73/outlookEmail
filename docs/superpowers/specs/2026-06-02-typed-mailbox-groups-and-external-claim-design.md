@@ -89,6 +89,30 @@ CREATE TABLE IF NOT EXISTS mailbox_claims (
 - 同一资源同一时间只能有一个有效 `claiming` 记录。
 - SQLite 条件唯一索引可用于保护未释放的领取状态，例如对 `resource_type, resource_id, status` 建索引；最终一致性仍由 `BEGIN IMMEDIATE` 事务保证。
 
+## Claim State Machine
+
+领取状态采用惰性回收，不依赖后台定时器在租约到期瞬间释放资源。
+
+状态流转：
+
+```text
+claiming -> completed   调用 complete 成功，资源移动到目标分组
+claiming -> released    调用 release 成功，资源留在源分组
+claiming -> expired     租约到期后，被下一次 claim 或 cleanup 惰性回收
+expired  -> completed   原客户端迟到 complete，且资源当前没有新的 claiming
+expired  + new claiming 资源被其他客户端重新领取，创建新的 claim 记录
+```
+
+具体规则：
+
+- `lease_expires_at` 到期后，claim 逻辑上过期，但数据库记录不需要立即改变。
+- 下一次 `claim` 请求会先扫描过期 `claiming` 记录，将其标记为 `expired`，再选择可领取资源。
+- 第一版不需要新增后台定时 cleanup；后续可选添加管理接口或调度任务做同样的惰性回收。
+- 迟到 `complete` 允许处理 `claiming` 或 `expired` 的旧 claim，前提是 `resource_type`、`resource_id`、`claim_token` 匹配，且同一资源当前没有其他有效 `claiming`。
+- 如果同一资源已被新的 claim 占用，旧 `claim_token` 的 `complete` 和 `release` 都返回 `409`。
+- 已经 `completed` 或 `released` 的 claim 再次 `complete` 或 `release` 返回 `409`，第一版不做幂等成功。
+- `release` 只处理当前有效 `claiming`；过期后已被标记为 `expired` 的 claim 不再接受 `release`，客户端可停止处理该邮箱或重新 claim。
+
 ## Backend Behavior
 
 ### Group APIs
@@ -162,7 +186,7 @@ POST /api/external/mailboxes/claim
 - 服务端按源分组 `mailbox_type` 选择资源表。
 - 只领取 `status='active'` 的邮箱资源。
 - 按资源 ID 升序分配。
-- 领取时先回收过期 `claiming` 记录。
+- 领取时先按状态机规则惰性回收过期 `claiming` 记录。
 - 事务使用 `BEGIN IMMEDIATE`，保证多个并发进程不会领取到同一个资源。
 
 成功返回：
@@ -212,7 +236,7 @@ POST /api/external/mailboxes/complete
 
 规则：
 
-- `claim_token` 必须匹配当前 `claiming` 记录。
+- `claim_token` 必须匹配同一资源的 `claiming` 或 `expired` 记录。
 - 即使租约已过期，只要资源未被其他 claim 重新领取且 token 仍匹配，仍允许完成。
 - `target_group_id` 的 `mailbox_type` 必须与 `resource_type` 一致，否则返回 `400`。
 - 完成时在同一个事务里移动资源分组并把 claim 标记为 `completed`。
@@ -242,6 +266,7 @@ POST /api/external/mailboxes/release
 - `claim_token` 必须匹配当前 `claiming` 记录。
 - 释放后不移动分组。
 - 资源留在源分组，后续可重新领取。
+- 如果 claim 已过期并被标记为 `expired`，`release` 返回 `409`。
 
 ## Error Semantics
 
@@ -249,7 +274,7 @@ POST /api/external/mailboxes/release
 - `401`：API Key 缺失或错误。
 - `403`：服务端未配置对外 API Key。
 - `404`：源分组、目标分组或资源不存在。
-- `409`：claim token 不匹配、claim 已完成、已释放或已被重新领取。
+- `409`：claim token 不匹配、claim 已完成、已释放、已过期、已被重新领取，或资源已经被新的 claim 占用。
 - `200` 且 `mailbox=null`：没有可领取资源，不视为错误。
 
 ## Frontend Impact
@@ -301,6 +326,9 @@ POST /api/external/mailboxes/release
 - release 后资源留在源组，后续可以重新 claim。
 - token 不匹配返回 `409`。
 - 租约过期后未被重新领取时，token 匹配仍允许 complete。
+- 租约过期并被惰性回收后，旧 token complete 在资源未被重新领取时仍可完成。
+- 租约过期并被惰性回收后，旧 token release 返回 `409`。
+- 资源被新的 claim 占用后，旧 token complete 和 release 都返回 `409`。
 - 外部 claim 响应不包含凭据、代理、临时邮箱密钥。
 
 静态和编译检查：
