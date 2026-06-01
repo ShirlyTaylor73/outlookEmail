@@ -17,18 +17,67 @@ def get_cloudflare_admin_password() -> str:
 
 # ==================== 分组操作 ====================
 
+MAILBOX_TYPE_ACCOUNT = 'account'
+MAILBOX_TYPE_TEMP_EMAIL = 'temp_email'
+VALID_MAILBOX_TYPES = {MAILBOX_TYPE_ACCOUNT, MAILBOX_TYPE_TEMP_EMAIL}
+
+
+def normalize_mailbox_type(value: Any = None) -> str:
+    """归一化分组邮箱类型。"""
+    mailbox_type = str(value or '').strip().lower()
+    if mailbox_type in VALID_MAILBOX_TYPES:
+        return mailbox_type
+    return MAILBOX_TYPE_ACCOUNT
+
+
+def get_default_account_group_id(db=None) -> Optional[int]:
+    database = db or get_db()
+    row = database.execute(
+        '''
+        SELECT id FROM groups
+        WHERE name = '默认分组' AND mailbox_type = 'account'
+        ORDER BY id
+        LIMIT 1
+        '''
+    ).fetchone()
+    return int(row['id']) if row else None
+
+
+def get_default_temp_email_group_id(db=None) -> Optional[int]:
+    database = db or get_db()
+    row = database.execute(
+        '''
+        SELECT id FROM groups
+        WHERE name = '临时邮箱' AND mailbox_type = 'temp_email'
+        ORDER BY id
+        LIMIT 1
+        '''
+    ).fetchone()
+    return int(row['id']) if row else None
+
+
+def get_group_mailbox_type(group_id: int, db=None) -> Optional[str]:
+    database = db or get_db()
+    row = database.execute('SELECT mailbox_type FROM groups WHERE id = ?', (group_id,)).fetchone()
+    if not row:
+        return None
+    return normalize_mailbox_type(row['mailbox_type'])
+
+
 def load_groups() -> List[Dict]:
-    """加载所有分组（临时邮箱分组排在最前面）"""
+    """加载所有分组。"""
     db = get_db()
     cursor = db.execute('''
         SELECT * FROM groups
-        ORDER BY
-            CASE WHEN name = '临时邮箱' THEN 0 ELSE 1 END,
-            sort_order,
-            id
+        ORDER BY sort_order, id
     ''')
     rows = cursor.fetchall()
-    return [dict(row) for row in rows]
+    groups = []
+    for row in rows:
+        group = dict(row)
+        group['mailbox_type'] = normalize_mailbox_type(group.get('mailbox_type'))
+        groups.append(group)
+    return groups
 
 
 def get_group_by_id(group_id: int) -> Optional[Dict]:
@@ -36,15 +85,19 @@ def get_group_by_id(group_id: int) -> Optional[Dict]:
     db = get_db()
     cursor = db.execute('SELECT * FROM groups WHERE id = ?', (group_id,))
     row = cursor.fetchone()
-    return dict(row) if row else None
+    if not row:
+        return None
+    group = dict(row)
+    group['mailbox_type'] = normalize_mailbox_type(group.get('mailbox_type'))
+    return group
 
 
 def get_movable_group_ids(db=None, exclude_group_id: Optional[int] = None) -> List[int]:
-    """获取可排序分组 ID 列表（不含临时邮箱）"""
+    """获取可排序分组 ID 列表。"""
     database = db or get_db()
     query = '''
         SELECT id FROM groups
-        WHERE name != '临时邮箱'
+        WHERE 1 = 1
     '''
     params = []
     if exclude_group_id is not None:
@@ -60,12 +113,6 @@ def apply_group_order(group_ids: List[int], db=None) -> None:
     database = db or get_db()
     for index, group_id in enumerate(group_ids, start=1):
         database.execute('UPDATE groups SET sort_order = ? WHERE id = ?', (index, group_id))
-
-    temp_group = database.execute(
-        "SELECT id FROM groups WHERE name = '临时邮箱' LIMIT 1"
-    ).fetchone()
-    if temp_group:
-        database.execute('UPDATE groups SET sort_order = 0 WHERE id = ?', (temp_group['id'],))
 
 
 def normalize_group_order(db=None) -> None:
@@ -95,8 +142,8 @@ def get_group_sort_position(group_id: int, db=None) -> Optional[int]:
 def set_group_position(group_id: int, sort_position: Optional[int], db=None) -> bool:
     """设置分组在可排序列表中的位置"""
     database = db or get_db()
-    group = database.execute('SELECT id, name FROM groups WHERE id = ?', (group_id,)).fetchone()
-    if not group or group['name'] == '临时邮箱':
+    group = database.execute('SELECT id FROM groups WHERE id = ?', (group_id,)).fetchone()
+    if not group:
         return False
 
     group_ids = get_movable_group_ids(database, exclude_group_id=group_id)
@@ -108,18 +155,24 @@ def set_group_position(group_id: int, sort_position: Optional[int], db=None) -> 
 
 def add_group(name: str, description: str = '', color: str = '#1a1a1a',
               proxy_url: str = '', fallback_proxy_url_1: str = '',
-              fallback_proxy_url_2: str = '', sort_position: Optional[int] = None) -> Optional[int]:
+              fallback_proxy_url_2: str = '', sort_position: Optional[int] = None,
+              mailbox_type: str = MAILBOX_TYPE_ACCOUNT) -> Optional[int]:
     """添加分组"""
     db = get_db()
+    normalized_mailbox_type = normalize_mailbox_type(mailbox_type)
     try:
         cursor = db.execute(
             '''
             INSERT INTO groups (
-                name, description, color, proxy_url, fallback_proxy_url_1, fallback_proxy_url_2, sort_order
+                name, description, color, proxy_url, fallback_proxy_url_1,
+                fallback_proxy_url_2, sort_order, mailbox_type
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             ''',
-            (name, description, color, proxy_url or '', fallback_proxy_url_1 or '', fallback_proxy_url_2 or '', 999999)
+            (
+                name, description, color, proxy_url or '', fallback_proxy_url_1 or '',
+                fallback_proxy_url_2 or '', 999999, normalized_mailbox_type,
+            )
         )
         group_id = cursor.lastrowid
         set_group_position(group_id, sort_position, db)
@@ -133,15 +186,34 @@ def add_group(name: str, description: str = '', color: str = '#1a1a1a',
 
 def update_group(group_id: int, name: str, description: str, color: str,
                  proxy_url: str = '', fallback_proxy_url_1: str = '',
-                 fallback_proxy_url_2: str = '', sort_position: Optional[int] = None) -> bool:
+                 fallback_proxy_url_2: str = '', sort_position: Optional[int] = None,
+                 mailbox_type: Optional[str] = None) -> bool:
     """更新分组"""
     db = get_db()
     try:
+        current_group = db.execute('SELECT * FROM groups WHERE id = ?', (group_id,)).fetchone()
+        if not current_group:
+            return False
+
+        current_mailbox_type = normalize_mailbox_type(current_group['mailbox_type'])
+        target_mailbox_type = current_mailbox_type
+        if mailbox_type is not None:
+            target_mailbox_type = normalize_mailbox_type(mailbox_type)
+            if target_mailbox_type != current_mailbox_type:
+                account_count = get_group_account_count(group_id)
+                temp_count = get_group_temp_email_count(group_id, db)
+                if account_count or temp_count:
+                    return False
+
         db.execute('''
             UPDATE groups
-            SET name = ?, description = ?, color = ?, proxy_url = ?, fallback_proxy_url_1 = ?, fallback_proxy_url_2 = ?
+            SET name = ?, description = ?, color = ?, proxy_url = ?,
+                fallback_proxy_url_1 = ?, fallback_proxy_url_2 = ?, mailbox_type = ?
             WHERE id = ?
-        ''', (name, description, color, proxy_url or '', fallback_proxy_url_1 or '', fallback_proxy_url_2 or '', group_id))
+        ''', (
+            name, description, color, proxy_url or '', fallback_proxy_url_1 or '',
+            fallback_proxy_url_2 or '', target_mailbox_type, group_id,
+        ))
         if not set_group_position(group_id, sort_position, db):
             return False
         db.commit()
@@ -151,14 +223,26 @@ def update_group(group_id: int, name: str, description: str, color: str,
 
 
 def delete_group(group_id: int) -> bool:
-    """删除分组（将该分组下的邮箱移到默认分组）"""
+    """删除分组，并将组内资源移到对应类型的默认分组。"""
     db = get_db()
     try:
-        # 将该分组下的邮箱移到默认分组（id=1）
-        db.execute('UPDATE accounts SET group_id = 1 WHERE group_id = ?', (group_id,))
-        # 删除分组（不能删除默认分组）
-        if group_id != 1:
-            db.execute('DELETE FROM groups WHERE id = ?', (group_id,))
+        group = db.execute('SELECT * FROM groups WHERE id = ?', (group_id,)).fetchone()
+        if not group or int(group['is_system'] or 0):
+            return False
+
+        mailbox_type = normalize_mailbox_type(group['mailbox_type'])
+        if mailbox_type == MAILBOX_TYPE_TEMP_EMAIL:
+            fallback_group_id = get_default_temp_email_group_id(db)
+            if not fallback_group_id or fallback_group_id == group_id:
+                return False
+            db.execute('UPDATE temp_emails SET group_id = ? WHERE group_id = ?', (fallback_group_id, group_id))
+        else:
+            fallback_group_id = get_default_account_group_id(db)
+            if not fallback_group_id or fallback_group_id == group_id:
+                return False
+            db.execute('UPDATE accounts SET group_id = ? WHERE group_id = ?', (fallback_group_id, group_id))
+
+        db.execute('DELETE FROM groups WHERE id = ?', (group_id,))
         normalize_group_order(db)
         db.commit()
         return True
@@ -174,8 +258,16 @@ def get_group_account_count(group_id: int) -> int:
     return row['count'] if row else 0
 
 
+def get_group_temp_email_count(group_id: int, db=None) -> int:
+    """获取分组下的临时邮箱数量"""
+    database = db or get_db()
+    cursor = database.execute('SELECT COUNT(*) as count FROM temp_emails WHERE group_id = ?', (group_id,))
+    row = cursor.fetchone()
+    return int(row['count']) if row else 0
+
+
 def reorder_groups(group_ids: List[int]) -> bool:
-    """重新排序分组，临时邮箱分组固定在最前面"""
+    """重新排序分组。"""
     db = get_db()
     try:
         movable_ids = get_movable_group_ids(db)

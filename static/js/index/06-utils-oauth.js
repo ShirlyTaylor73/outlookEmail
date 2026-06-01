@@ -1,4 +1,4 @@
-        /* global accountsCache, currentGroupId, escapeHtml, groups, hideModal, invalidateRefreshTokenPreview, isTempEmailGroup, loadAccountsByGroup, loadGroups, oauthPreviewAccount, renderRefreshTokenPreview, setModalVisible, showModal, showToast, updateGroupSelects */
+        /* global accountsCache, currentGroupId, escapeHtml, getGroupsByMailboxType, groups, hideModal, invalidateRefreshTokenPreview, isAccountMailboxGroup, isTempEmailGroup, loadAccountsByGroup, loadGroups, oauthPreviewAccount, renderRefreshTokenPreview, setModalVisible, showModal, showToast, updateGroupSelects */
 
         // ==================== 工具函数 ====================
 
@@ -101,10 +101,16 @@
 
             const groupSelect = document.getElementById('tokenSaveGroupSelect');
             if (groupSelect) {
-                const nonTempGroups = groups.filter(group => group.name !== '临时邮箱');
-                const fallbackGroupId = (!isTempEmailGroup && currentGroupId && nonTempGroups.find(group => group.id === currentGroupId))
+                const accountGroups = typeof getGroupsByMailboxType === 'function'
+                    ? getGroupsByMailboxType('account')
+                    : groups.filter(group => (
+                        typeof isAccountMailboxGroup === 'function'
+                            ? isAccountMailboxGroup(group)
+                            : String(group?.mailbox_type || 'account').toLowerCase() === 'account'
+                    ));
+                const fallbackGroupId = (!isTempEmailGroup && currentGroupId && accountGroups.find(group => group.id === currentGroupId))
                     ? currentGroupId
-                    : (nonTempGroups[0]?.id || '');
+                    : (accountGroups[0]?.id || '');
                 if (fallbackGroupId) {
                     groupSelect.value = fallbackGroupId;
                 }

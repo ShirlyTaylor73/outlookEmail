@@ -14,10 +14,18 @@
                     <label class="form-label">分组描述</label>
                     <input type="text" class="form-input" id="groupDescription" placeholder="可选">
                 </div>
+                <div class="form-group" id="groupMailboxTypeGroup">
+                    <label class="form-label">分组类型</label>
+                    <select class="form-select" id="groupMailboxType">
+                        <option value="account">普通邮箱</option>
+                        <option value="temp_email">临时邮箱</option>
+                    </select>
+                    <div class="form-hint">一个分组只能管理一种邮箱资源，保存后有资源时不能切换类型。</div>
+                </div>
                 <div class="form-group">
                     <label class="form-label">排序位置</label>
                     <select class="form-select" id="groupSortPosition"></select>
-                    <div class="form-hint">临时邮箱固定在最前，其他分组从第 1 位开始排序。</div>
+                    <div class="form-hint">所有分组按排序值显示，系统默认分组不可删除但可排序。</div>
                 </div>
                 <div class="form-group">
                     <label class="form-label">分组颜色</label>

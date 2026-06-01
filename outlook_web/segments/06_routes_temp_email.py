@@ -480,16 +480,18 @@ TEMP_EMAIL_PROVIDER_LABELS = {
 
 def get_temp_email_group_id() -> int:
     """获取临时邮箱分组的 ID"""
-    db = get_db()
-    cursor = db.execute("SELECT id FROM groups WHERE name = '临时邮箱'")
-    row = cursor.fetchone()
-    return row['id'] if row else 2
+    return get_default_temp_email_group_id()
 
 
-def load_temp_emails() -> List[Dict]:
-    """加载所有临时邮箱"""
+def load_temp_emails(group_id: int = None) -> List[Dict]:
+    """加载临时邮箱，可按分组过滤。"""
     db = get_db()
-    cursor = db.execute('SELECT * FROM temp_emails ORDER BY created_at DESC')
+    params = []
+    where_clause = ''
+    if group_id is not None:
+        where_clause = 'WHERE group_id = ?'
+        params.append(group_id)
+    cursor = db.execute(f'SELECT * FROM temp_emails {where_clause} ORDER BY created_at DESC', params)
     rows = cursor.fetchall()
     emails = []
     for row in rows:
@@ -559,20 +561,24 @@ def remove_temp_email_tag(temp_email_id: int, tag_id: int) -> bool:
 def add_temp_email(email_addr: str, provider: str = 'gptmail',
                    duckmail_token: str = None, duckmail_account_id: str = None,
                    duckmail_password: str = None, cloudflare_jwt: str = None,
-                   cloudflare_address_id: str = None) -> bool:
+                   cloudflare_address_id: str = None, group_id: int = None) -> bool:
     """添加临时邮箱"""
     db = get_db()
+    target_group_id = group_id if group_id is not None else get_default_temp_email_group_id()
+    if not target_group_id:
+        return False
     try:
         db.execute('''INSERT INTO temp_emails (
                         email, provider, duckmail_token, duckmail_account_id, duckmail_password,
-                        cloudflare_jwt, cloudflare_address_id
-                      ) VALUES (?, ?, ?, ?, ?, ?, ?)''',
+                        cloudflare_jwt, cloudflare_address_id, group_id
+                      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)''',
                    (email_addr, provider,
                     encrypt_data(duckmail_token) if duckmail_token else None,
                     duckmail_account_id,
                     encrypt_data(duckmail_password) if duckmail_password else None,
                     encrypt_data(cloudflare_jwt) if cloudflare_jwt else None,
-                    cloudflare_address_id))
+                    cloudflare_address_id,
+                    target_group_id))
         db.commit()
         return True
     except sqlite3.IntegrityError:
@@ -1179,12 +1185,36 @@ def delete_temp_email_message(message_id: str) -> bool:
         return False
 
 
-def get_temp_email_count() -> int:
-    """获取临时邮箱数量"""
+def get_temp_email_count(group_id: int = None) -> int:
+    """获取临时邮箱数量，可按分组过滤。"""
     db = get_db()
-    cursor = db.execute('SELECT COUNT(*) as count FROM temp_emails')
+    params = []
+    where_clause = ''
+    if group_id is not None:
+        where_clause = 'WHERE group_id = ?'
+        params.append(group_id)
+    cursor = db.execute(f'SELECT COUNT(*) as count FROM temp_emails {where_clause}', params)
     row = cursor.fetchone()
     return row['count'] if row else 0
+
+
+def parse_optional_group_id(value: Any) -> Optional[int]:
+    if value in (None, ''):
+        return None
+    try:
+        group_id = int(value)
+    except (TypeError, ValueError):
+        return None
+    return group_id if group_id > 0 else None
+
+
+def validate_temp_email_group_id(group_id: Optional[int]) -> tuple[Optional[int], Optional[str]]:
+    target_group_id = group_id if group_id is not None else get_default_temp_email_group_id()
+    if not target_group_id:
+        return None, '临时邮箱默认分组不存在'
+    if get_group_mailbox_type(target_group_id) != MAILBOX_TYPE_TEMP_EMAIL:
+        return None, '临时邮箱只能使用临时邮箱分组'
+    return target_group_id, None
 
 
 # ==================== 临时邮箱 API 路由 ====================
@@ -1193,7 +1223,8 @@ def get_temp_email_count() -> int:
 @login_required
 def api_get_temp_emails():
     """获取所有临时邮箱"""
-    emails = load_temp_emails()
+    group_id = request.args.get('group_id', type=int)
+    emails = load_temp_emails(group_id)
     return jsonify({'success': True, 'emails': emails})
 
 
@@ -1485,6 +1516,49 @@ def api_batch_delete_temp_emails():
     })
 
 
+@app.route('/api/temp-emails/batch-update-group', methods=['POST'])
+@login_required
+def api_batch_update_temp_email_group():
+    """批量更新临时邮箱分组。"""
+    data = request.json or {}
+    temp_email_ids = data.get('temp_email_ids', [])
+    group_id = parse_optional_group_id(data.get('group_id'))
+
+    if not temp_email_ids:
+        return jsonify({'success': False, 'error': '请选择要修改的临时邮箱'}), 400
+    if group_id is None:
+        return jsonify({'success': False, 'error': '请选择目标分组'}), 400
+
+    target_group_id, group_error = validate_temp_email_group_id(group_id)
+    if group_error:
+        return jsonify({'success': False, 'error': group_error}), 400
+
+    normalized_ids = normalize_account_ids(temp_email_ids)
+    if not normalized_ids:
+        return jsonify({'success': False, 'error': '请选择有效的临时邮箱'}), 400
+
+    db = get_db()
+    try:
+        placeholders = ','.join('?' * len(normalized_ids))
+        db.execute(
+            f'''
+            UPDATE temp_emails
+            SET group_id = ?, updated_at = CURRENT_TIMESTAMP
+            WHERE id IN ({placeholders})
+            ''',
+            [target_group_id] + normalized_ids
+        )
+        db.commit()
+        return jsonify({
+            'success': True,
+            'message': f'已移动 {len(normalized_ids)} 个临时邮箱',
+            'updated_count': len(normalized_ids),
+        })
+    except Exception as e:
+        db.rollback()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
 @app.route('/api/temp-emails/import', methods=['POST'])
 @login_required
 def api_import_temp_emails():
@@ -1492,6 +1566,10 @@ def api_import_temp_emails():
     data = request.json
     import_text = data.get('account_string', '').strip()
     provider = data.get('provider', 'gptmail')
+    target_group_id, group_error = validate_temp_email_group_id(parse_optional_group_id(data.get('group_id')))
+
+    if group_error:
+        return jsonify({'success': False, 'error': group_error}), 400
 
     if not import_text:
         return jsonify({'success': False, 'error': '请输入要导入的临时邮箱'})
@@ -1521,8 +1599,14 @@ def api_import_temp_emails():
                         if existing:
                             # 更新密码和 provider
                             db = get_db()
-                            db.execute('UPDATE temp_emails SET duckmail_password = ?, provider = ? WHERE email = ?',
-                                       (encrypt_data(duckmail_password), 'duckmail', email_addr))
+                            db.execute(
+                                '''
+                                UPDATE temp_emails
+                                SET duckmail_password = ?, provider = ?, group_id = ?
+                                WHERE email = ?
+                                ''',
+                                (encrypt_data(duckmail_password), 'duckmail', target_group_id, email_addr)
+                            )
                             db.commit()
                             updated += 1
                         else:
@@ -1530,7 +1614,8 @@ def api_import_temp_emails():
                                 email_addr, provider='duckmail',
                                 duckmail_token=None,
                                 duckmail_account_id=None,
-                                duckmail_password=duckmail_password
+                                duckmail_password=duckmail_password,
+                                group_id=target_group_id
                             ):
                                 skipped += 1
                                 continue
@@ -1564,15 +1649,20 @@ def api_import_temp_emails():
                         db = get_db()
                         if existing:
                             db.execute(
-                                'UPDATE temp_emails SET cloudflare_jwt = ?, provider = ? WHERE email = ?',
-                                (encrypt_data(cloudflare_jwt), 'cloudflare', email_addr)
+                                '''
+                                UPDATE temp_emails
+                                SET cloudflare_jwt = ?, provider = ?, group_id = ?
+                                WHERE email = ?
+                                ''',
+                                (encrypt_data(cloudflare_jwt), 'cloudflare', target_group_id, email_addr)
                             )
                             db.commit()
                             updated += 1
                         elif add_temp_email(
                             email_addr,
                             provider='cloudflare',
-                            cloudflare_jwt=cloudflare_jwt
+                            cloudflare_jwt=cloudflare_jwt,
+                            group_id=target_group_id
                         ):
                             added += 1
                         else:
@@ -1587,8 +1677,14 @@ def api_import_temp_emails():
                 if email_addr and '@' in email_addr:
                     existing = get_temp_email_by_address(email_addr)
                     if existing:
+                        db = get_db()
+                        db.execute(
+                            'UPDATE temp_emails SET provider = ?, group_id = ? WHERE email = ?',
+                            ('gptmail', target_group_id, email_addr)
+                        )
+                        db.commit()
                         updated += 1
-                    elif add_temp_email(email_addr, provider='gptmail'):
+                    elif add_temp_email(email_addr, provider='gptmail', group_id=target_group_id):
                         added += 1
                     else:
                         skipped += 1
@@ -1716,6 +1812,10 @@ def api_generate_temp_email():
     """生成新的临时邮箱（支持 GPTMail、DuckMail 和 Cloudflare）"""
     data = request.json or {}
     provider = data.get('provider', 'gptmail')
+    target_group_id, group_error = validate_temp_email_group_id(parse_optional_group_id(data.get('group_id')))
+
+    if group_error:
+        return jsonify({'success': False, 'error': group_error}), 400
 
     if provider == 'duckmail':
         # DuckMail: 需要 domain、username、password
@@ -1757,7 +1857,8 @@ def api_generate_temp_email():
         if add_temp_email(email_addr, provider='duckmail',
                          duckmail_token=token,
                          duckmail_account_id=account_id,
-                         duckmail_password=password):
+                         duckmail_password=password,
+                         group_id=target_group_id):
             return jsonify({'success': True, 'email': email_addr, 'message': 'DuckMail 临时邮箱创建成功'})
         else:
             return jsonify({'success': False, 'error': '邮箱已存在'})
@@ -1788,7 +1889,8 @@ def api_generate_temp_email():
             email_addr,
             provider='cloudflare',
             cloudflare_jwt=jwt,
-            cloudflare_address_id=address_id
+            cloudflare_address_id=address_id,
+            group_id=target_group_id
         ):
             return jsonify({'success': True, 'email': email_addr, 'message': 'Cloudflare 临时邮箱创建成功'})
         return jsonify({'success': False, 'error': '邮箱已存在'})
@@ -1800,7 +1902,7 @@ def api_generate_temp_email():
         email_addr = generate_temp_email(prefix, domain)
 
         if email_addr:
-            if add_temp_email(email_addr, provider='gptmail'):
+            if add_temp_email(email_addr, provider='gptmail', group_id=target_group_id):
                 return jsonify({'success': True, 'email': email_addr, 'message': '临时邮箱创建成功'})
             else:
                 return jsonify({'success': False, 'error': '邮箱已存在'})

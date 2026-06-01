@@ -4,6 +4,21 @@
 
         const ACCOUNT_SEARCH_MAX_TERMS = 200;
 
+        function isTempMailboxGroup(group) {
+            return String(group?.mailbox_type || '').toLowerCase() === 'temp_email';
+        }
+
+        function isAccountMailboxGroup(group) {
+            return String(group?.mailbox_type || 'account').toLowerCase() === 'account';
+        }
+
+        function getGroupsByMailboxType(type) {
+            const normalizedType = String(type || 'account').toLowerCase();
+            return groups.filter(group => normalizedType === 'temp_email'
+                ? isTempMailboxGroup(group)
+                : isAccountMailboxGroup(group));
+        }
+
         // 加载分组列表
         async function loadGroups() {
             const container = document.getElementById('groupList');
@@ -17,7 +32,7 @@
                     groups = data.groups;
 
                     // 找到临时邮箱分组
-                    const tempGroup = groups.find(g => g.name === '临时邮箱');
+                    const tempGroup = groups.find(isTempMailboxGroup);
                     if (tempGroup) {
                         tempEmailGroupId = tempGroup.id;
                     }
@@ -35,8 +50,8 @@
                         if (savedGroupId) {
                             currentGroupId = parseInt(savedGroupId);
                         } else if (groups.length > 0) {
-                            // 如果没有缓存，默认选中"临时邮箱"或者首个分组
-                            const tempMatch = groups.find(g => g.name === '临时邮箱');
+                            // 如果没有缓存，默认选中临时邮箱或者首个分组
+                            const tempMatch = groups.find(isTempMailboxGroup);
                             currentGroupId = tempMatch ? tempMatch.id : groups[0].id;
                         }
                     }
@@ -84,17 +99,17 @@
             }
 
             container.innerHTML = groups.map(group => {
-                const isSystem = group.is_system === 1 || group.name === '临时邮箱';
-                const isTempGroup = group.name === '临时邮箱';
+                const isSystem = group.is_system === 1;
+                const isTempGroup = isTempMailboxGroup(group);
                 const isDefault = group.id === 1;
                 const isDragging = groupDragState.isDragging && groupDragState.groupId === group.id;
                 const groupName = normalizeGroupName(group.name);
                 const groupIdBadgeText = formatGroupIdBadgeText(group.id);
 
                 return `
-                    <div class="group-item ${currentGroupId === group.id ? 'active' : ''} ${isTempGroup ? 'temp-email-group' : ''} ${!isTempGroup ? 'draggable' : ''} ${isDragging ? 'dragging' : ''}"
+                    <div class="group-item ${currentGroupId === group.id ? 'active' : ''} ${isTempGroup ? 'temp-email-group' : ''} draggable ${isDragging ? 'dragging' : ''}"
                          data-group-id="${group.id}"
-                         ${!isTempGroup ? `onpointerdown="handleGroupPointerDown(event, ${group.id})"` : ''}
+                         onpointerdown="handleGroupPointerDown(event, ${group.id})"
                          onclick="handleGroupClick(event, ${group.id})">
                         <div class="group-row-1">
                             <div class="group-color" style="background-color: ${group.color || '#666'}"></div>
@@ -116,17 +131,16 @@
         }
 
         function getMovableGroups() {
-            return groups.filter(group => group.name !== '临时邮箱');
+            return groups;
         }
 
         function reorderGroupData(orderIds) {
-            const tempGroups = groups.filter(group => group.name === '临时邮箱');
             const movableMap = new Map(getMovableGroups().map(group => [group.id, group]));
-            groups = [...tempGroups, ...orderIds.map(id => movableMap.get(id)).filter(Boolean)];
+            groups = orderIds.map(id => movableMap.get(id)).filter(Boolean);
         }
 
         function getGroupSortPositionCount(editingId = null) {
-            const movableGroups = groups.filter(group => group.name !== '临时邮箱' && group.id !== editingId);
+            const movableGroups = groups.filter(group => group.id !== editingId);
             return movableGroups.length + 1;
         }
 
@@ -385,7 +399,8 @@
 
             // 检查是否是临时邮箱分组
             const group = groups.find(g => g.id === groupId);
-            isTempEmailGroup = group && group.name === '临时邮箱';
+            isTempEmailGroup = !!(group && isTempMailboxGroup(group));
+            updateGroupSelects();
 
             // 更新分组列表 UI
             document.querySelectorAll('.group-item').forEach(item => {
@@ -522,8 +537,9 @@
             document.querySelectorAll('.provider-filter-btn').forEach(btn => {
                 btn.classList.toggle('active', btn.dataset.provider === currentFilter);
             });
-            if (accountsCache['temp']) {
-                renderTempEmailList(accountsCache['temp']);
+            const tempCacheKey = `temp:${currentGroupId}`;
+            if (accountsCache[tempCacheKey]) {
+                renderTempEmailList(accountsCache[tempCacheKey]);
             }
         }
 
@@ -1302,8 +1318,9 @@
             }
 
             if (isTempEmailGroup) {
-                if (accountsCache['temp']) {
-                    renderTempEmailList(accountsCache['temp']);
+                const tempCacheKey = `temp:${currentGroupId}`;
+                if (accountsCache[tempCacheKey]) {
+                    renderTempEmailList(accountsCache[tempCacheKey]);
                 } else {
                     await loadTempEmails();
                 }
@@ -1360,14 +1377,15 @@
         // 更新分组下拉选择框
         function updateGroupSelects() {
             const selects = ['importGroupSelect', 'editGroupSelect', 'tokenSaveGroupSelect'];
+            const currentGroup = groups.find(g => g.id === currentGroupId);
+            const importMailboxType = isTempMailboxGroup(currentGroup) || isTempEmailGroup ? 'temp_email' : 'account';
             selects.forEach(selectId => {
                 const select = document.getElementById(selectId);
                 if (select) {
                     const currentValue = select.value;
-                    // editGroupSelect 和 tokenSaveGroupSelect 过滤掉临时邮箱分组
-                    const filteredGroups = (selectId === 'editGroupSelect' || selectId === 'tokenSaveGroupSelect')
-                        ? groups.filter(g => g.name !== '临时邮箱')
-                        : groups;
+                    const filteredGroups = selectId === 'importGroupSelect'
+                        ? getGroupsByMailboxType(importMailboxType)
+                        : getGroupsByMailboxType('account');
 
                     select.innerHTML = filteredGroups.map(g =>
                         `<option value="${g.id}">${escapeHtml(normalizeGroupName(g.name))}</option>`
@@ -1384,6 +1402,8 @@
                         }
                     } else if (currentGroupId && filteredGroups.find(g => g.id === currentGroupId)) {
                         select.value = currentGroupId;
+                    } else if (selectId === 'importGroupSelect' && filteredGroups.length > 0) {
+                        select.value = filteredGroups[0].id;
                     }
                 }
             });
@@ -1417,7 +1437,7 @@
         function isTempImportGroup() {
             const importSelect = document.getElementById('importGroupSelect');
             const selectedGroup = groups.find(g => g.id === parseInt(importSelect?.value || '0'));
-            return !!(selectedGroup && selectedGroup.name === '临时邮箱');
+            return !!(selectedGroup && isTempMailboxGroup(selectedGroup));
         }
 
         function normalizeForwardChannels(rawChannels) {
@@ -1635,6 +1655,18 @@
             document.getElementById('groupModalTitle').textContent = '添加分组';
             document.getElementById('groupName').value = '';
             document.getElementById('groupDescription').value = '';
+            const mailboxTypeSelect = document.getElementById('groupMailboxType');
+            const mailboxTypeGroup = document.getElementById('groupMailboxTypeGroup');
+            if (mailboxTypeSelect) {
+                mailboxTypeSelect.value = 'account';
+                mailboxTypeSelect.disabled = false;
+            }
+            if (mailboxTypeGroup) {
+                const hint = mailboxTypeGroup.querySelector('.form-hint');
+                if (hint) {
+                    hint.textContent = '一个分组只能管理一种邮箱资源，保存后有资源时不能切换类型。';
+                }
+            }
             updateGroupSortPositionOptions();
             selectedColor = '#1a1a1a';
             document.querySelectorAll('.color-option').forEach(o => {
@@ -1664,6 +1696,21 @@
                     document.getElementById('groupModalTitle').textContent = '编辑分组';
                     document.getElementById('groupName').value = data.group.name;
                     document.getElementById('groupDescription').value = data.group.description || '';
+                    const mailboxTypeSelect = document.getElementById('groupMailboxType');
+                    const mailboxTypeGroup = document.getElementById('groupMailboxTypeGroup');
+                    if (mailboxTypeSelect) {
+                        mailboxTypeSelect.value = isTempMailboxGroup(data.group) ? 'temp_email' : 'account';
+                        const hasResources = Number(data.group.account_count || 0) > 0;
+                        mailboxTypeSelect.disabled = hasResources;
+                        if (mailboxTypeGroup) {
+                            const hint = mailboxTypeGroup.querySelector('.form-hint');
+                            if (hint) {
+                                hint.textContent = hasResources
+                                    ? '该分组已有资源，不能切换类型。'
+                                    : '一个分组只能管理一种邮箱资源，保存后有资源时不能切换类型。';
+                            }
+                        }
+                    }
                     updateGroupSortPositionOptions(groupId, data.group.sort_position);
                     selectedColor = data.group.color || '#1a1a1a';
 
@@ -1699,6 +1746,7 @@
             const name = document.getElementById('groupName').value.trim();
             const description = document.getElementById('groupDescription').value.trim();
             const sortPosition = parseInt(document.getElementById('groupSortPosition').value);
+            const mailboxType = document.getElementById('groupMailboxType')?.value || 'account';
 
             if (!name) {
                 showToast('请输入分组名称', 'error');
@@ -1719,6 +1767,7 @@
                         proxy_url: document.getElementById('groupProxyUrl').value.trim(),
                         fallback_proxy_url_1: document.getElementById('groupFallbackProxyUrl1').value.trim(),
                         fallback_proxy_url_2: document.getElementById('groupFallbackProxyUrl2').value.trim(),
+                        mailbox_type: mailboxType,
                         sort_position: sortPosition
                     })
                 });

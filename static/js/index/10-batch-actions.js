@@ -245,7 +245,7 @@
             if (batchEnableForwardingBtn) batchEnableForwardingBtn.style.display = isTempContext ? 'none' : 'inline-flex';
             if (batchDisableForwardingBtn) batchDisableForwardingBtn.style.display = isTempContext ? 'none' : 'inline-flex';
             if (batchProxyBtn) batchProxyBtn.style.display = isTempContext ? 'none' : 'inline-flex';
-            if (batchMoveGroupBtn) batchMoveGroupBtn.style.display = isTempContext ? 'none' : 'inline-flex';
+            if (batchMoveGroupBtn) batchMoveGroupBtn.style.display = 'inline-flex';
             if (batchAddTagBtn) batchAddTagBtn.style.display = 'inline-flex';
             if (batchRemoveTagBtn) batchRemoveTagBtn.style.display = 'inline-flex';
             if (batchDeleteBtn) batchDeleteBtn.style.display = 'inline-flex';
@@ -323,8 +323,19 @@
                     const isDeleting = batchDeleteBtn.dataset.loading === 'true';
                     batchDeleteBtn.disabled = isDeleting;
                     if (!isDeleting) {
-                        batchDeleteBtn.textContent = checked.length > 1 ? `删除 (${checked.length})` : '删除';
+                        const deleteLabel = isTempContext ? '删除临时邮箱' : '删除账号';
+                        batchDeleteBtn.textContent = checked.length > 1 ? `${deleteLabel} (${checked.length})` : deleteLabel;
+                        batchDeleteBtn.title = isTempContext ? '删除选中的临时邮箱' : '删除选中的账号';
                     }
+                }
+                if (batchMoveGroupBtn) {
+                    const isMoving = batchMoveGroupBtn.dataset.loading === 'true';
+                    batchMoveGroupBtn.disabled = isMoving;
+                    const moveLabel = isTempContext ? '移动临时邮箱' : '移动账号';
+                    if (!isMoving) {
+                        batchMoveGroupBtn.textContent = checked.length > 1 ? `${moveLabel} (${checked.length})` : moveLabel;
+                    }
+                    batchMoveGroupBtn.title = isTempContext ? '移动选中的临时邮箱到其他临时邮箱分组' : '移动选中的账号到其他普通邮箱分组';
                 }
                 positionAccountBatchActionBar();
             } else {
@@ -370,6 +381,13 @@
                     batchDeleteBtn.disabled = false;
                     batchDeleteBtn.dataset.loading = 'false';
                     batchDeleteBtn.textContent = '删除';
+                    batchDeleteBtn.title = '';
+                }
+                if (batchMoveGroupBtn) {
+                    batchMoveGroupBtn.disabled = false;
+                    batchMoveGroupBtn.dataset.loading = 'false';
+                    batchMoveGroupBtn.textContent = isTempContext ? '移动临时邮箱' : '移动账号';
+                    batchMoveGroupBtn.title = '';
                 }
             }
         }
@@ -639,7 +657,7 @@
 
                 showToast(data.message || `已删除 ${deletedEmails.length} 个${resourceLabel}`, 'success');
                 if (isTempContext) {
-                    delete accountsCache.temp;
+                    delete accountsCache[`temp:${currentGroupId}`];
                 } else {
                     invalidateAccountCaches();
                 }
@@ -825,6 +843,10 @@
 
         // 显示批量移动分组模态框
         async function showBatchMoveGroupModal() {
+            const title = document.querySelector('#batchMoveGroupModal .modal-header h3');
+            if (title) {
+                title.textContent = isTempEmailGroup ? '移动临时邮箱到分组' : '移动账号到分组';
+            }
             showModal('batchMoveGroupModal');
             await loadGroupsForBatchMove();
         }
@@ -842,8 +864,11 @@
                 const response = await fetch('/api/groups');
                 const data = await response.json();
                 if (data.success) {
+                    const targetType = isTempEmailGroup ? 'temp_email' : 'account';
                     let html = '<option value="">请选择分组...</option>';
-                    data.groups.filter(g => !g.is_system).forEach(group => {
+                    data.groups
+                        .filter(group => String(group?.mailbox_type || 'account').toLowerCase() === targetType)
+                        .forEach(group => {
                         html += `<option value="${group.id}">${escapeHtml(normalizeGroupName(group.name))}</option>`;
                     });
                     select.innerHTML = html;
@@ -862,16 +887,19 @@
             }
 
             const checked = document.querySelectorAll('.account-select-checkbox:checked');
-            const accountIds = Array.from(checked).map(cb => parseInt(cb.value));
+            const resourceIds = Array.from(checked).map(cb => parseInt(cb.value));
 
-            if (accountIds.length === 0) return;
+            if (resourceIds.length === 0) return;
 
             try {
-                const response = await fetch('/api/accounts/batch-update-group', {
+                const isTempContext = !!isTempEmailGroup;
+                const response = await fetch(
+                    isTempContext ? '/api/temp-emails/batch-update-group' : '/api/accounts/batch-update-group',
+                    {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
-                        account_ids: accountIds,
+                        [isTempContext ? 'temp_email_ids' : 'account_ids']: resourceIds,
                         group_id: parseInt(groupId)
                     })
                 });
@@ -882,7 +910,9 @@
                     hideBatchMoveGroupModal();
                     // 刷新分组列表
                     loadGroups();
-                    if (currentGroupId) {
+                    if (isTempContext) {
+                        delete accountsCache[`temp:${currentGroupId}`];
+                    } else if (currentGroupId) {
                         delete accountsCache[currentGroupId];
                     }
                     await refreshVisibleAccountList(true);
