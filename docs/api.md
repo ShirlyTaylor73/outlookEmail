@@ -588,16 +588,11 @@ curl -X POST "http://localhost:5000/api/external/mailboxes/claim" \
 | `success` | bool | 是否成功处理请求 |
 | `mailbox` | object 或 null | 领取到的资源；无可领取资源时为 `null` |
 | `mailbox.resource_type` | string | `account` 或 `temp_email` |
-| `mailbox.resource_id` / `mailbox.id` | int | 资源 ID |
+| `mailbox.resource_id` | int | 资源 ID |
 | `mailbox.email` | string | 邮箱地址 |
-| `mailbox.status` | string | 资源状态 |
-| `mailbox.provider` | string | 邮箱提供商 |
-| `mailbox.account_type` | string | 普通账号类型；临时邮箱通常为空字符串 |
 | `mailbox.group_id` | int | 当前资源所在分组 |
-| `mailbox.source_group_id` | int | 本次领取的源分组 |
 | `mailbox.claim_token` | string | 后续 complete 或 release 必须携带的领取 token |
 | `mailbox.lease_expires_at` | string | UTC 租约到期时间，格式 `YYYY-MM-DD HH:MM:SS` |
-| `mailbox.created_at` / `mailbox.updated_at` | string | 资源创建和更新时间 |
 
 ```json
 {
@@ -605,17 +600,10 @@ curl -X POST "http://localhost:5000/api/external/mailboxes/claim" \
   "mailbox": {
     "resource_type": "account",
     "resource_id": 123,
-    "id": 123,
     "email": "user@example.com",
-    "status": "active",
-    "provider": "outlook",
-    "account_type": "outlook",
     "group_id": 1,
-    "source_group_id": 1,
     "claim_token": "mclm_xxx",
-    "lease_expires_at": "2026-06-02 10:10:00",
-    "created_at": "2026-06-02 09:00:00",
-    "updated_at": "2026-06-02 09:00:00"
+    "lease_expires_at": "2026-06-02 10:10:00"
   }
 }
 ```

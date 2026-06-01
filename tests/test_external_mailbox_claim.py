@@ -181,6 +181,12 @@ class ExternalMailboxClaimTests(unittest.TestCase):
         self.assertTrue(payload['success'])
         return payload['mailbox']
 
+    def _assert_claim_mailbox_fields(self, mailbox):
+        self.assertEqual(
+            set(mailbox.keys()),
+            {'resource_type', 'resource_id', 'email', 'group_id', 'claim_token', 'lease_expires_at'},
+        )
+
     def _claim_status(self, claim_token):
         with self.app.app_context():
             db = web_outlook_app.get_db()
@@ -223,8 +229,10 @@ class ExternalMailboxClaimTests(unittest.TestCase):
         self.assertEqual(mailbox['resource_type'], 'account')
         self.assertEqual(mailbox['resource_id'], first_id)
         self.assertEqual(mailbox['email'], 'first@example.com')
+        self.assertEqual(mailbox['group_id'], self.account_group_id)
         self.assertTrue(mailbox['claim_token'])
         self.assertTrue(mailbox['lease_expires_at'])
+        self._assert_claim_mailbox_fields(mailbox)
         serialized = json.dumps(mailbox, ensure_ascii=False)
         for forbidden in ('password', 'refresh_token', 'imap_password', 'proxy_url'):
             self.assertNotIn(forbidden, serialized)
@@ -240,8 +248,10 @@ class ExternalMailboxClaimTests(unittest.TestCase):
         self.assertEqual(mailbox['resource_type'], 'temp_email')
         self.assertEqual(mailbox['resource_id'], first_id)
         self.assertEqual(mailbox['email'], 'first-temp@example.com')
+        self.assertEqual(mailbox['group_id'], self.temp_group_id)
         self.assertTrue(mailbox['claim_token'])
         self.assertTrue(mailbox['lease_expires_at'])
+        self._assert_claim_mailbox_fields(mailbox)
         serialized = json.dumps(mailbox, ensure_ascii=False)
         for forbidden in ('duckmail_token', 'duckmail_password', 'cloudflare_jwt'):
             self.assertNotIn(forbidden, serialized)
@@ -409,6 +419,24 @@ class ExternalMailboxClaimTests(unittest.TestCase):
         new_mailbox = self._mailbox(self._claim(self.account_group_id, caller_id='worker-2', task_id='task-2'))
 
         response = self._complete(old_mailbox['claim_token'], self.account_target_group_id)
+
+        self.assertNotEqual(new_mailbox['claim_token'], old_mailbox['claim_token'])
+        self.assertEqual(response.status_code, 409)
+
+    def test_old_token_release_returns_409_after_resource_reclaimed(self):
+        self._insert_account('release-reclaimed@example.com', self.account_group_id)
+        old_mailbox = self._mailbox(self._claim(self.account_group_id))
+        with self.app.app_context():
+            db = web_outlook_app.get_db()
+            db.execute(
+                "UPDATE mailbox_claims SET status = 'expired', lease_expires_at = datetime('now', '-1 minute') "
+                "WHERE claim_token = ?",
+                (old_mailbox['claim_token'],),
+            )
+            db.commit()
+        new_mailbox = self._mailbox(self._claim(self.account_group_id, caller_id='worker-2', task_id='task-2'))
+
+        response = self._release(old_mailbox['claim_token'])
 
         self.assertNotEqual(new_mailbox['claim_token'], old_mailbox['claim_token'])
         self.assertEqual(response.status_code, 409)

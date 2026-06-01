@@ -239,6 +239,42 @@ class TempEmailGroupTests(unittest.TestCase):
         self.assertEqual(response.status_code, 400)
         self.assertFalse(response.get_json()['success'])
 
+    def test_import_account_rejects_temp_email_group_without_writing(self):
+        with self.app.app_context():
+            temp_group = self._create_group('导入普通账号禁用临时组', mailbox_type='temp_email', sort_order=2)
+
+        with patch.object(web_outlook_app, 'add_accounts_bulk') as add_accounts_bulk:
+            response = self.client.post('/api/accounts', json={
+                'account_string': 'blocked@example.com----client-id----refresh-token',
+                'account_format': 'client_id_refresh_token',
+                'group_id': temp_group['id'],
+            })
+
+        self.assertEqual(response.status_code, 400)
+        self.assertFalse(response.get_json()['success'])
+        add_accounts_bulk.assert_not_called()
+
+    def test_update_account_rejects_temp_email_group_without_moving(self):
+        with self.app.app_context():
+            account_group = self._default_group()
+            temp_group = self._create_group('编辑普通账号禁用临时组', mailbox_type='temp_email', sort_order=2)
+            account = self._insert_account('edit-blocked@example.com', account_group['id'])
+
+        with patch.object(web_outlook_app, 'update_account') as update_account:
+            response = self.client.put(f'/api/accounts/{account["id"]}', json={
+                'email': 'edit-blocked@example.com',
+                'password': 'pwd',
+                'client_id': 'client-id',
+                'refresh_token': 'refresh-token',
+                'group_id': temp_group['id'],
+                'account_type': 'outlook',
+                'provider': 'outlook',
+            })
+
+        self.assertEqual(response.status_code, 400)
+        self.assertFalse(response.get_json()['success'])
+        update_account.assert_not_called()
+
     def test_temp_email_can_move_only_to_temp_group(self):
         with self.app.app_context():
             account_group = self._default_group()
@@ -300,6 +336,7 @@ class TempEmailGroupTests(unittest.TestCase):
         groups_js = _read_project_text('static/js/index/02-groups.js')
         temp_emails_js = _read_project_text('static/js/index/03-temp-emails.js')
         accounts_js = _read_project_text('static/js/index/04-accounts.js')
+        oauth_js = _read_project_text('static/js/index/06-utils-oauth.js')
         settings_js = _read_project_text('static/js/index/07-settings.js')
 
         self.assertIn('groupMailboxType', dialogs_html)
@@ -309,6 +346,12 @@ class TempEmailGroupTests(unittest.TestCase):
         self.assertIn('/api/temp-emails?', temp_emails_js)
         self.assertIn('group_id', accounts_js)
         self.assertIn('group_id', settings_js)
+        self.assertNotIn("group.name !== '临时邮箱'", oauth_js)
+        self.assertTrue(
+            'getGroupsByMailboxType' in oauth_js
+            or 'isAccountMailboxGroup' in oauth_js
+            or 'mailbox_type' in oauth_js
+        )
 
 
 if __name__ == '__main__':

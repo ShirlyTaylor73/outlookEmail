@@ -864,21 +864,14 @@ def generate_mailbox_claim_token() -> str:
 
 
 def serialize_claimed_mailbox(resource_type: str, row, claim_token: str,
-                              lease_expires_at: str, source_group_id: int) -> Dict[str, Any]:
+                              lease_expires_at: str) -> Dict[str, Any]:
     return {
         'resource_type': resource_type,
         'resource_id': int(row['id']),
-        'id': int(row['id']),
         'email': row['email'],
-        'status': row['status'],
-        'provider': row['provider'] if 'provider' in row.keys() else '',
-        'account_type': row['account_type'] if 'account_type' in row.keys() else '',
         'group_id': row['group_id'],
-        'source_group_id': source_group_id,
         'claim_token': claim_token,
         'lease_expires_at': lease_expires_at,
-        'created_at': row['created_at'] if 'created_at' in row.keys() else '',
-        'updated_at': row['updated_at'] if 'updated_at' in row.keys() else '',
     }
 
 
@@ -1042,7 +1035,6 @@ def claim_external_mailbox(source_group_id, caller_id: str, task_id: str,
                     row,
                     claim_token,
                     lease_expires_at,
-                    source_group_id,
                 )
             except sqlite3.IntegrityError:
                 continue
@@ -1828,6 +1820,36 @@ def api_replace_account_aliases_endpoint(account_id):
     })
 
 
+def validate_account_target_group_id(group_id) -> Optional[str]:
+    group = get_group_by_id(group_id)
+    if not group:
+        return '目标分组不存在'
+    if normalize_mailbox_type(group.get('mailbox_type')) != MAILBOX_TYPE_ACCOUNT:
+        return '普通账号只能导入或移动到普通邮箱分组'
+    return None
+
+
+@app.before_request
+def reject_account_write_to_non_account_group():
+    if not session.get('logged_in'):
+        return None
+    if request.method == 'POST' and request.path == '/api/accounts':
+        data = request.get_json(silent=True) or {}
+    elif request.method == 'PUT' and request.path.startswith('/api/accounts/'):
+        path_parts = request.path.strip('/').split('/')
+        if len(path_parts) != 3 or not path_parts[2].isdigit():
+            return None
+        data = request.get_json(silent=True) or {}
+    else:
+        return None
+
+    group_id = data.get('group_id', 1)
+    group_error = validate_account_target_group_id(group_id)
+    if group_error:
+        return jsonify({'success': False, 'error': group_error}), 400
+    return None
+
+
 @app.route('/api/accounts', methods=['POST'])
 @login_required
 def api_add_account():
@@ -1853,6 +1875,10 @@ def api_add_account():
     
     if not account_str:
         return jsonify({'success': False, 'error': '请输入账号信息'})
+
+    group_error = validate_account_target_group_id(group_id)
+    if group_error:
+        return jsonify({'success': False, 'error': group_error}), 400
     
     # 支持批量导入（多行）
     lines = account_str.strip().split('\n')
@@ -1978,6 +2004,10 @@ def api_update_account(account_id):
         _, alias_errors = validate_account_aliases(account_id, email_addr, aliases)
         if alias_errors:
             return jsonify({'success': False, 'error': '；'.join(alias_errors), 'errors': alias_errors})
+
+    group_error = validate_account_target_group_id(group_id)
+    if group_error:
+        return jsonify({'success': False, 'error': group_error}), 400
 
     if update_account(
         account_id, email_addr, password, client_id, refresh_token, group_id, sort_order, remark, status,
