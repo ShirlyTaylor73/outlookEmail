@@ -2265,6 +2265,7 @@ def delete_account_by_id(account_id: int) -> bool:
     db = get_db()
     try:
         mark_project_accounts_deleted_for_account_ids([account_id], db=db)
+        db.execute('DELETE FROM account_shares WHERE account_id = ?', (account_id,))
         db.execute('DELETE FROM accounts WHERE id = ?', (account_id,))
         db.commit()
         return True
@@ -2280,6 +2281,7 @@ def delete_account_by_email(email_addr: str) -> bool:
         row = db.execute('SELECT id FROM accounts WHERE email = ? LIMIT 1', (email_addr,)).fetchone()
         if row:
             mark_project_accounts_deleted_for_account_ids([row['id']], db=db)
+            db.execute('DELETE FROM account_shares WHERE account_id = ?', (row['id'],))
         db.execute('DELETE FROM accounts WHERE email = ?', (email_addr,))
         db.commit()
         return True
@@ -2330,6 +2332,7 @@ def delete_accounts_by_ids(account_ids: List[int]) -> Dict[str, Any]:
     try:
         delete_placeholders = ','.join('?' * len(existing_ids))
         mark_project_accounts_deleted_for_account_ids(existing_ids, db=db)
+        db.execute(f'DELETE FROM account_shares WHERE account_id IN ({delete_placeholders})', existing_ids)
         db.execute(f'DELETE FROM accounts WHERE id IN ({delete_placeholders})', existing_ids)
         db.commit()
         return {

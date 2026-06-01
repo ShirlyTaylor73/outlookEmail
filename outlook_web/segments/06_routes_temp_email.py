@@ -656,23 +656,24 @@ def create_temp_email_share(temp_email_id: int, expires_in: int) -> Optional[Dic
         expires_at_dt = datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(milliseconds=expires_in)
         expires_at = expires_at_dt.strftime('%Y-%m-%dT%H:%M:%SZ')
 
-    for _ in range(SHARE_TOKEN_RETRY_LIMIT):
-        token = secrets.token_urlsafe(24)
-        try:
-            cursor = db.execute('''
-                INSERT INTO temp_email_shares (temp_email_id, token, expires_at)
-                VALUES (?, ?, ?)
-            ''', (temp_email_id, token, expires_at))
-            db.commit()
-            row = db.execute(
-                'SELECT * FROM temp_email_shares WHERE id = ?',
-                (cursor.lastrowid,)
-            ).fetchone()
-            return serialize_temp_email_share(row) if row else None
-        except sqlite3.IntegrityError:
-            db.rollback()
-            continue
-    return None
+    token = generate_unique_share_token()
+    if not token:
+        return None
+
+    try:
+        cursor = db.execute('''
+            INSERT INTO temp_email_shares (temp_email_id, token, expires_at)
+            VALUES (?, ?, ?)
+        ''', (temp_email_id, token, expires_at))
+        db.commit()
+        row = db.execute(
+            'SELECT * FROM temp_email_shares WHERE id = ?',
+            (cursor.lastrowid,)
+        ).fetchone()
+        return serialize_temp_email_share(row) if row else None
+    except sqlite3.IntegrityError:
+        db.rollback()
+        return None
 
 
 def delete_temp_email_share(temp_email_id: int, share_id: int) -> bool:
@@ -680,6 +681,81 @@ def delete_temp_email_share(temp_email_id: int, share_id: int) -> bool:
     cursor = db.execute(
         'DELETE FROM temp_email_shares WHERE temp_email_id = ? AND id = ?',
         (temp_email_id, share_id)
+    )
+    db.commit()
+    return cursor.rowcount > 0
+
+
+def share_token_exists(token: str) -> bool:
+    db = get_db()
+    for table in ('temp_email_shares', 'account_shares'):
+        row = db.execute(f'SELECT 1 FROM {table} WHERE token = ? LIMIT 1', (token,)).fetchone()
+        if row:
+            return True
+    return False
+
+
+def generate_unique_share_token() -> Optional[str]:
+    for _ in range(SHARE_TOKEN_RETRY_LIMIT):
+        token = secrets.token_urlsafe(24)
+        if not share_token_exists(token):
+            return token
+    return None
+
+
+def serialize_account_share(row) -> Dict[str, Any]:
+    item = dict(row)
+    return {
+        'id': item.get('id'),
+        'account_id': item.get('account_id'),
+        'token': item.get('token'),
+        'created_at': item.get('created_at'),
+        'expires_at': item.get('expires_at'),
+    }
+
+
+def list_account_shares(account_id: int) -> List[Dict[str, Any]]:
+    rows = get_db().execute('''
+        SELECT *
+        FROM account_shares
+        WHERE account_id = ?
+        ORDER BY created_at DESC, id DESC
+    ''', (account_id,)).fetchall()
+    return [serialize_account_share(row) for row in rows]
+
+
+def create_account_share(account_id: int, expires_in: int) -> Optional[Dict[str, Any]]:
+    db = get_db()
+    expires_at = None
+    if expires_in != 0:
+        expires_at_dt = datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(milliseconds=expires_in)
+        expires_at = expires_at_dt.strftime('%Y-%m-%dT%H:%M:%SZ')
+
+    token = generate_unique_share_token()
+    if not token:
+        return None
+
+    try:
+        cursor = db.execute('''
+            INSERT INTO account_shares (account_id, token, expires_at)
+            VALUES (?, ?, ?)
+        ''', (account_id, token, expires_at))
+        db.commit()
+        row = db.execute(
+            'SELECT * FROM account_shares WHERE id = ?',
+            (cursor.lastrowid,)
+        ).fetchone()
+        return serialize_account_share(row) if row else None
+    except sqlite3.IntegrityError:
+        db.rollback()
+        return None
+
+
+def delete_account_share(account_id: int, share_id: int) -> bool:
+    db = get_db()
+    cursor = db.execute(
+        'DELETE FROM account_shares WHERE account_id = ? AND id = ?',
+        (account_id, share_id)
     )
     db.commit()
     return cursor.rowcount > 0
@@ -729,6 +805,44 @@ def get_valid_temp_email_share(token: str):
     return share, temp_email, None
 
 
+def get_valid_account_share(token: str):
+    if not token:
+        return None, None, (jsonify({'success': False, 'error': 'Share link not found'}), 404)
+
+    db = get_db()
+    share_row = db.execute(
+        'SELECT * FROM account_shares WHERE token = ?',
+        (token,)
+    ).fetchone()
+    if not share_row:
+        return None, None, (jsonify({'success': False, 'error': 'Share link not found'}), 404)
+
+    share = dict(share_row)
+    expires_at = parse_sqlite_timestamp(share.get('expires_at'))
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    if expires_at and expires_at < now:
+        return None, None, (jsonify({'success': False, 'error': 'Share link expired'}), 410)
+
+    account = get_account_by_id(share.get('account_id'))
+    if not account:
+        return None, None, (jsonify({'success': False, 'error': 'Account not found'}), 404)
+    return share, account, None
+
+
+def resolve_shared_resource(token: str):
+    share, temp_email, error_response = get_valid_temp_email_share(token)
+    if not error_response:
+        return 'temp_email', share, temp_email, None
+    status_code = error_response[1] if isinstance(error_response, tuple) else 500
+    if status_code != 404:
+        return None, None, None, error_response
+
+    share, account, error_response = get_valid_account_share(token)
+    if not error_response:
+        return 'account', share, account, None
+    return None, None, None, error_response
+
+
 def format_temp_email_message_list(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """格式化公开临时邮箱邮件列表。"""
     return [{
@@ -753,6 +867,80 @@ def format_shared_temp_email_detail(msg: Dict[str, Any], email_addr: str) -> Dic
         'date': msg.get('created_at', ''),
         'timestamp': msg.get('timestamp', 0),
     }
+
+
+def account_message_request_method(message: Dict[str, Any], list_result: Dict[str, Any]) -> str:
+    def normalize_request_method(value: Any) -> str:
+        text = str(value or '').strip().lower()
+        if text in {'graph', 'imap', 'local'}:
+            return text
+        if 'graph' in text:
+            return 'graph'
+        if 'imap' in text:
+            return 'imap'
+        if 'local' in text:
+            return 'local'
+        return ''
+
+    explicit = str(message.get('method') or message.get('request_method') or '').strip().lower()
+    normalized_explicit = normalize_request_method(explicit)
+    if normalized_explicit:
+        return normalized_explicit
+    folder = str(message.get('folder') or '').strip().lower()
+    folder_summaries = list_result.get('folder_summaries') if isinstance(list_result, dict) else {}
+    folder_summary = folder_summaries.get(folder) if isinstance(folder_summaries, dict) else None
+    summary_method = normalize_request_method((folder_summary or {}).get('request_method') or (folder_summary or {}).get('method'))
+    if summary_method:
+        return summary_method
+    result_method = normalize_request_method(
+        (list_result.get('request_method') or list_result.get('method')) if isinstance(list_result, dict) else ''
+    )
+    if result_method:
+        return result_method
+    return ''
+
+
+def format_account_message_list(messages: List[Dict[str, Any]], list_result: Dict[str, Any]) -> List[Dict[str, Any]]:
+    formatted = []
+    for msg in messages:
+        formatted.append({
+            'id': msg.get('id') or msg.get('message_id') or msg.get('provider_message_id'),
+            'from': msg.get('from') or msg.get('sender') or '未知',
+            'to': msg.get('to') or msg.get('recipients') or '',
+            'subject': msg.get('subject') or 'No subject',
+            'body_preview': msg.get('body_preview') or '',
+            'date': msg.get('date') or msg.get('received_at') or '',
+            'timestamp': msg.get('timestamp') or 0,
+            'has_html': 1 if str(msg.get('body_type') or '').lower() == 'html' else 0,
+            'folder': normalize_folder_name(msg.get('folder') or 'inbox'),
+            'id_mode': str(msg.get('id_mode') or '').strip().lower(),
+            'method': account_message_request_method(msg, list_result),
+        })
+    return formatted
+
+
+def format_shared_account_detail(detail: Dict[str, Any], account: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        'id': detail.get('id') or detail.get('message_id'),
+        'from': detail.get('from') or detail.get('sender') or '未知',
+        'to': detail.get('to') or detail.get('recipients') or account.get('email', ''),
+        'cc': detail.get('cc') or '',
+        'subject': detail.get('subject') or 'No subject',
+        'body': detail.get('body') or '',
+        'body_type': detail.get('body_type') or 'text',
+        'date': detail.get('date') or detail.get('received_at') or '',
+        'timestamp': detail.get('timestamp') or 0,
+        'folder': normalize_folder_name(detail.get('folder') or 'inbox'),
+        'id_mode': str(detail.get('id_mode') or '').strip().lower(),
+    }
+
+
+def provider_label_for_account(account: Dict[str, Any]) -> str:
+    provider = str(account.get('provider') or '').strip()
+    account_type = str(account.get('account_type') or '').strip().lower()
+    if provider:
+        return provider.upper() if provider in {'imap', 'pop'} else provider.capitalize()
+    return 'IMAP' if account_type == 'imap' else 'Outlook'
 
 
 def parse_temp_message_timestamp(value: Any) -> int:
@@ -857,6 +1045,63 @@ def refresh_shared_temp_email_messages(share: Dict[str, Any], temp_email: Dict[s
         }
     except Exception:
         return {'success': False, 'error': '刷新邮件失败'}
+
+
+def refresh_shared_account_messages(share: Dict[str, Any], account: Dict[str, Any]) -> Dict[str, Any]:
+    try:
+        result = fetch_account_emails(account, 'all', 0, 50)
+        if not result.get('success'):
+            return {'success': False, 'error': '刷新邮件失败'}
+        emails = format_account_message_list(result.get('emails', []), result)
+        return {
+            'success': True,
+            'emails': emails,
+            'count': len(emails),
+            'method': result.get('method', ''),
+            'share_type': 'account',
+        }
+    except Exception:
+        return {'success': False, 'error': '刷新邮件失败'}
+
+
+def fetch_shared_account_message_detail(account: Dict[str, Any], message_id: str,
+                                        folder: str, method: str, id_mode: str) -> Optional[Dict[str, Any]]:
+    folder_name = normalize_folder_name(folder)
+    requested_method = str(method or '').strip().lower()
+    requested_id_mode = str(id_mode or '').strip().lower()
+
+    if requested_method == 'local':
+        retained = fetch_retained_normal_mail_detail(account, folder_name, message_id, requested_id_mode)
+        if retained and retained.get('success'):
+            return retained.get('email', {})
+        return None
+
+    proxy_url = get_account_proxy_url(account)
+    fallback_proxy_urls = get_account_proxy_failover_urls(account)
+
+    try:
+        if account.get('account_type') == 'imap':
+            result = fetch_imap_account_detail_response(
+                account, folder_name, message_id, requested_method or 'imap', requested_id_mode, proxy_url
+            )
+        elif requested_method == 'graph':
+            result = fetch_graph_detail_response(
+                account, folder_name, message_id, 'graph', requested_id_mode, proxy_url, fallback_proxy_urls
+            )
+        else:
+            result = fetch_oauth_imap_detail_response(
+                account, folder_name, message_id, requested_method or 'imap',
+                requested_id_mode, proxy_url, fallback_proxy_urls
+            )
+            if not result and requested_method != 'imap':
+                result = fetch_graph_detail_response(
+                    account, folder_name, message_id, 'graph', requested_id_mode, proxy_url, fallback_proxy_urls
+                )
+        if result and result.get('success'):
+            return result.get('email', {})
+    except Exception:
+        return None
+    return None
 
 
 def cleanup_temp_email_provider_resource(temp_email: Optional[Dict]) -> None:
@@ -993,10 +1238,48 @@ def api_delete_temp_email_share(temp_email_id, share_id):
     return jsonify({'success': True})
 
 
+@app.route('/api/accounts/<int:account_id>/shares', methods=['GET'])
+@login_required
+def api_get_account_shares(account_id):
+    if not get_account_by_id(account_id):
+        return jsonify({'success': False, 'error': 'Account not found'}), 404
+
+    shares = list_account_shares(account_id)
+    return jsonify({'success': True, 'shares': shares, 'total': len(shares)})
+
+
+@app.route('/api/accounts/<int:account_id>/shares', methods=['POST'])
+@login_required
+def api_create_account_share(account_id):
+    if not get_account_by_id(account_id):
+        return jsonify({'success': False, 'error': 'Account not found'}), 404
+
+    data = request.get_json(silent=True) or {}
+    expires_in, error = normalize_share_expires_in(data.get('expires_in'))
+    if error:
+        return jsonify({'success': False, 'error': error}), 400
+
+    share = create_account_share(account_id, expires_in)
+    if not share:
+        return jsonify({'success': False, 'error': '创建分享链接失败'}), 500
+    return jsonify({'success': True, 'share': share}), 201
+
+
+@app.route('/api/accounts/<int:account_id>/shares/<int:share_id>', methods=['DELETE'])
+@login_required
+def api_delete_account_share(account_id, share_id):
+    if not get_account_by_id(account_id):
+        return jsonify({'success': False, 'error': 'Account not found'}), 404
+
+    if not delete_account_share(account_id, share_id):
+        return jsonify({'success': False, 'error': 'Share link not found'}), 404
+    return jsonify({'success': True})
+
+
 @app.route('/shared/<token>', methods=['GET'])
 @csrf_exempt
 def shared_temp_email_page(token):
-    share, temp_email, error_response = get_valid_temp_email_share(token)
+    share_type, share, resource, error_response = resolve_shared_resource(token)
     status_code = 200
     if error_response:
         status_code = error_response[1] if isinstance(error_response, tuple) else 404
@@ -1006,13 +1289,29 @@ def shared_temp_email_page(token):
 @app.route('/api/shared/<token>', methods=['GET'])
 def api_shared_temp_email(token):
     """公开获取分享临时邮箱信息。"""
-    share, temp_email, error_response = get_valid_temp_email_share(token)
+    share_type, share, resource, error_response = resolve_shared_resource(token)
     if error_response:
         return error_response
 
+    if share_type == 'account':
+        account = resource
+        return jsonify({
+            'success': True,
+            'share_type': 'account',
+            'email': {
+                'email': account.get('email'),
+                'provider': account.get('provider') or account.get('account_type') or 'outlook',
+                'provider_label': provider_label_for_account(account),
+                'created_at': account.get('created_at'),
+                'expires_at': share.get('expires_at'),
+            }
+        })
+
+    temp_email = resource
     provider = temp_email.get('provider', 'gptmail')
     return jsonify({
         'success': True,
+        'share_type': 'temp_email',
         'email': {
             'email': temp_email.get('email'),
             'provider': provider,
@@ -1026,28 +1325,55 @@ def api_shared_temp_email(token):
 @app.route('/api/shared/<token>/messages', methods=['GET'])
 def api_shared_temp_email_messages(token):
     """公开获取分享临时邮箱缓存邮件列表。"""
-    share, temp_email, error_response = get_valid_temp_email_share(token)
+    share_type, share, resource, error_response = resolve_shared_resource(token)
     if error_response:
         return error_response
 
+    if share_type == 'account':
+        result = fetch_retained_normal_mail_list(resource, 'all', 0, 100)
+        emails = format_account_message_list(result.get('emails', []), result) if result.get('success') else []
+        return jsonify({
+            'success': True,
+            'share_type': 'account',
+            'emails': emails,
+            'count': len(emails),
+            'has_more': bool(result.get('has_more')) if result.get('success') else False,
+        })
+
+    temp_email = resource
     messages = get_temp_email_messages(temp_email.get('email', ''))
     formatted = format_temp_email_message_list(messages)
-    return jsonify({'success': True, 'emails': formatted, 'count': len(formatted)})
+    return jsonify({'success': True, 'share_type': 'temp_email', 'emails': formatted, 'count': len(formatted)})
 
 
 @app.route('/api/shared/<token>/messages/<path:message_id>', methods=['GET'])
 def api_shared_temp_email_message_detail(token, message_id):
     """公开获取分享临时邮箱邮件详情。"""
-    share, temp_email, error_response = get_valid_temp_email_share(token)
+    share_type, share, resource, error_response = resolve_shared_resource(token)
     if error_response:
         return error_response
 
+    if share_type == 'account':
+        folder = request.args.get('folder', 'inbox')
+        method = request.args.get('method', '')
+        id_mode = request.args.get('id_mode', '')
+        detail = fetch_shared_account_message_detail(resource, message_id, folder, method, id_mode)
+        if not detail:
+            return jsonify({'success': False, 'error': 'Message not found'}), 404
+        return jsonify({
+            'success': True,
+            'share_type': 'account',
+            'email': format_shared_account_detail(detail, resource)
+        })
+
+    temp_email = resource
     msg = get_temp_email_message_by_id(message_id)
     if not msg or msg.get('email_address') != temp_email.get('email'):
         return jsonify({'success': False, 'error': '邮件不存在'}), 404
 
     return jsonify({
         'success': True,
+        'share_type': 'temp_email',
         'email': format_shared_temp_email_detail(msg, temp_email.get('email', ''))
     })
 
@@ -1056,32 +1382,38 @@ def api_shared_temp_email_message_detail(token, message_id):
 @csrf_exempt
 def api_refresh_shared_temp_email_messages(token):
     """公开刷新分享临时邮箱邮件，按 token 做 30 秒节流。"""
-    share, temp_email, error_response = get_valid_temp_email_share(token)
+    share_type, share, resource, error_response = resolve_shared_resource(token)
     if error_response:
         return error_response
 
     now = datetime.now(timezone.utc).replace(tzinfo=None)
     last_refreshed_at = parse_sqlite_timestamp(share.get('last_refreshed_at'))
-    email_addr = temp_email.get('email', '')
     if last_refreshed_at and (now - last_refreshed_at).total_seconds() < SHARED_TEMP_EMAIL_REFRESH_THROTTLE_SECONDS:
-        messages = get_temp_email_messages(email_addr)
-        formatted = format_temp_email_message_list(messages)
+        if share_type == 'account':
+            result = fetch_retained_normal_mail_list(resource, 'all', 0, 100)
+            formatted = format_account_message_list(result.get('emails', []), result) if result.get('success') else []
+        else:
+            messages = get_temp_email_messages(resource.get('email', ''))
+            formatted = format_temp_email_message_list(messages)
         return jsonify({
             'success': True,
+            'share_type': share_type,
             'emails': formatted,
             'count': len(formatted),
             'throttled': True,
         })
 
     db = get_db()
+    table = 'account_shares' if share_type == 'account' else 'temp_email_shares'
     db.execute(
-        'UPDATE temp_email_shares SET last_refreshed_at = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?',
+        f'UPDATE {table} SET last_refreshed_at = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?',
         (now.strftime('%Y-%m-%dT%H:%M:%SZ'), share.get('id'))
     )
     db.commit()
 
-    result = refresh_shared_temp_email_messages(share, temp_email)
+    result = refresh_shared_account_messages(share, resource) if share_type == 'account' else refresh_shared_temp_email_messages(share, resource)
     result['throttled'] = False
+    result['share_type'] = share_type
     return jsonify(result)
 
 

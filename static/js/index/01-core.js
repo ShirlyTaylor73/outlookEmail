@@ -1339,6 +1339,8 @@
 
                     if (action === 'copy') {
                         copyEmail(accountEmail);
+                    } else if (action === 'share') {
+                        showAccountShareModal(accountId, accountEmail);
                     } else if (action === 'forwardingLogs') {
                         showAccountForwardingLogs(accountId, accountEmail);
                     } else if (action === 'toggleStatus') {

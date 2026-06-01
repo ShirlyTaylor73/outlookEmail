@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>临时邮箱分享</title>
+    <title>邮箱分享</title>
     <link rel="stylesheet" href="{{ url_for('static', filename='css/shared-temp-email.css') }}">
 </head>
 <body data-share-token="{{ token|e }}" data-initial-status="{{ initial_status }}">
@@ -11,7 +11,7 @@
         <header class="shared-header">
             <div class="shared-title-group">
                 <p class="shared-kicker">公开分享</p>
-                <h1 id="sharedEmailAddress">临时邮箱</h1>
+                <h1 id="sharedEmailAddress">邮箱分享</h1>
                 <p id="sharedExpiresAt" class="shared-meta">正在加载分享信息...</p>
             </div>
             <button id="sharedRefreshBtn" class="shared-refresh" type="button">刷新邮件</button>
@@ -19,7 +19,7 @@
 
         <div id="sharedStatus" class="shared-status" role="status" aria-live="polite"></div>
 
-        <section class="shared-workbench" aria-label="临时邮箱分享内容">
+        <section id="sharedWorkbench" class="shared-workbench" aria-label="邮箱分享内容">
             <aside class="shared-list-panel" aria-label="邮件列表">
                 <div class="panel-heading">
                     <h2>邮件列表</h2>

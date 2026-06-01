@@ -37,6 +37,7 @@
 | --- | --- | --- | --- | --- |
 | GET | `/api/external/accounts` | API Key | JSON | 获取普通邮箱账号列表 |
 | GET | `/api/external/emails` | API Key | JSON | 获取指定邮箱邮件列表 |
+| GET | `/api/external/verification-code` | API Key | JSON | 获取指定邮箱最新验证码 |
 
 ### 分组、账号、标签、项目
 
@@ -467,6 +468,89 @@ curl -H "X-API-Key: your-api-key" \
 4. `user@googlemail.com`
 
 如果使用回退候选命中，响应会包含 `resolved_query_email`、`fallback_used`、`fallback_email` 等字段。
+
+### GET `/api/external/verification-code`
+
+获取指定邮箱最新验证码。该接口会读取候选邮件详情并从完整正文中提取验证码，但响应不会返回完整正文、附件、原始 MIME 内容或账号凭据。
+
+适用场景：外部项目只需要验证码，不需要自行解析邮件 HTML。`/api/external/emails` 返回的 `body_preview` 只是预览，不保证包含完整验证码。
+
+#### 查询参数
+
+| 参数 | 类型 | 必填 | 默认值 | 说明 |
+| --- | --- | --- | --- | --- |
+| `email` | string | 是 | 无 | 主邮箱、别名邮箱或 plus-address，解析逻辑与 `/api/external/emails` 一致 |
+| `folder` | string | 否 | `all` | `inbox`、`junkemail`、`deleteditems`、`all` |
+| `top` | int | 否 | `5` | 候选邮件数量，最大 `20` |
+| `skip` | int | 否 | `0` | 候选列表分页偏移 |
+| `refresh` | bool-like | 否 | `false` | 传 `1`、`true`、`yes`、`on` 时先刷新邮件；按 `resolved_email + folder` 30 秒节流 |
+| `subject_contains` | string | 否 | 空 | 仅检查主题包含该关键字的候选邮件，大小写不敏感 |
+| `from_contains` | string | 否 | 空 | 仅检查发件人包含该关键字的候选邮件，大小写不敏感 |
+| `keyword` | string | 否 | 空 | 要求主题、预览或正文中包含该关键字后再提取验证码 |
+
+第一版验证码规则固定为 6 位数字，并优先匹配验证码上下文附近的大字号/灰底 HTML 代码块。
+
+#### 请求示例
+
+```bash
+curl -H "X-API-Key: your-api-key" \
+  "http://localhost:5000/api/external/verification-code?email=user@outlook.com&folder=all&refresh=1&subject_contains=verify&top=5"
+```
+
+#### 找到验证码响应示例
+
+```json
+{
+  "success": true,
+  "found": true,
+  "code": "051949",
+  "email": "user@outlook.com",
+  "requested_email": "user@outlook.com",
+  "resolved_email": "user@outlook.com",
+  "message_id": "4",
+  "subject": "ChatGPT temporary authentication code",
+  "from": "ChatGPT <noreply@tm.openai.com>",
+  "folder": "inbox",
+  "method": "imap",
+  "id_mode": "sequence",
+  "source": "body",
+  "date": "01-Jun-2026 02:46:44 +0800",
+  "checked_count": 2,
+  "throttled": false
+}
+```
+
+`source` 表示验证码命中来源，可能是 `body`、`subject` 或 `body_preview`。
+
+#### 未找到响应示例
+
+```json
+{
+  "success": true,
+  "found": false,
+  "email": "user@outlook.com",
+  "requested_email": "user@outlook.com",
+  "resolved_email": "user@outlook.com",
+  "checked_count": 5,
+  "throttled": false
+}
+```
+
+未找到验证码不是异常，保持 HTTP `200`，便于外部项目轮询。
+
+#### 错误响应
+
+| 场景 | HTTP | 示例 |
+| --- | --- | --- |
+| 缺少 API Key | `401` | `{"success": false, "error": "缺少 API Key，请通过 Header X-API-Key 或查询参数 api_key 提供"}` |
+| API Key 未配置 | `403` | `{"success": false, "error": "未配置对外 API Key，请在系统设置中配置"}` |
+| API Key 错误 | `401` | `{"success": false, "error": "API Key 无效"}` |
+| 缺少 `email` | `400` | `{"success": false, "error": "缺少 email 参数"}` |
+| 邮箱不存在 | `404` | `{"success": false, "error": "邮箱账号不存在"}` |
+| `folder` 无效 | `400` | `{"success": false, "error": "folder 参数无效，仅支持 all, deleteditems, inbox, junkemail"}` |
+| 邮件读取失败 | `502` | `{"success": false, "error": "获取验证码失败"}` |
+
+安全边界：响应不会返回 `password`、`refresh_token`、`client_id`、`imap_password`、`proxy_url`、转发配置、完整正文或完整上游错误详情。
 
 ## 内部 API
 

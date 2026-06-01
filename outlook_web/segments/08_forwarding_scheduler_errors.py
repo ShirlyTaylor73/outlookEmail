@@ -1605,6 +1605,279 @@ def email_matches_filters(account: Dict[str, Any], item: Dict[str, Any],
     return keyword in strip_html_content(body).lower()
 
 
+EXTERNAL_VERIFICATION_CODE_RE = re.compile(r'(?<!\d)\d{6}(?!\d)')
+EXTERNAL_VERIFICATION_CODE_BLOCK_RE = re.compile(
+    r'<(?P<tag>p|td|div|span|strong|b)\b(?P<attrs>[^>]*)>'
+    r'(?P<content>.{0,1000}?(?<!\d)\d{6}(?!\d).{0,1000}?)'
+    r'</(?P=tag)>',
+    re.IGNORECASE | re.DOTALL,
+)
+EXTERNAL_VERIFICATION_CONTEXT_KEYWORDS = (
+    'verification code',
+    'authentication code',
+    'temporary code',
+    'security code',
+    'one-time code',
+    'login code',
+    'sign in',
+    'verify',
+    'code',
+    '验证码',
+    '驗證碼',
+    '认证码',
+    '認証コード',
+    '認證碼',
+    '検証コード',
+)
+EXTERNAL_VERIFICATION_CODE_STYLE_MARKERS = (
+    'font-family: menlo',
+    'font-family: monaco',
+    'lucida console',
+    'monospace',
+    'background-color',
+    'font-size: 20px',
+    'font-size: 21px',
+    'font-size: 22px',
+    'font-size: 23px',
+    'font-size: 24px',
+    'font-size: 25px',
+    'font-size: 26px',
+    'font-size: 27px',
+    'font-size: 28px',
+    'font-size: 29px',
+    'font-size: 30px',
+    'letter-spacing',
+)
+EXTERNAL_VERIFICATION_REFRESH_TTL_SECONDS = 30
+EXTERNAL_VERIFICATION_REFRESH_STATE: Dict[str, float] = {}
+
+
+def parse_external_bool_arg(value: Any) -> bool:
+    return str(value or '').strip().lower() in {'1', 'true', 'yes', 'on'}
+
+
+def check_external_verification_refresh_throttle(resolved_email: str, folder: str) -> bool:
+    key = f'{str(resolved_email or "").strip().lower()}:{folder}'
+    now = time.time()
+    last_refreshed_at = EXTERNAL_VERIFICATION_REFRESH_STATE.get(key)
+    if last_refreshed_at is not None and now - last_refreshed_at < EXTERNAL_VERIFICATION_REFRESH_TTL_SECONDS:
+        return True
+    EXTERNAL_VERIFICATION_REFRESH_STATE[key] = now
+    return False
+
+
+def external_verification_item_matches(item: Dict[str, Any],
+                                       subject_contains: str = '',
+                                       from_contains: str = '') -> bool:
+    subject = str(item.get('subject', '') or '').lower()
+    sender = str(item.get('from', '') or '').lower()
+    if subject_contains and subject_contains not in subject:
+        return False
+    if from_contains and from_contains not in sender:
+        return False
+    return True
+
+
+def external_verification_has_context(text: str) -> bool:
+    normalized = str(text or '').lower()
+    return any(keyword.lower() in normalized for keyword in EXTERNAL_VERIFICATION_CONTEXT_KEYWORDS)
+
+
+def external_verification_block_has_code_style(attrs: str, content: str) -> bool:
+    normalized = f'{attrs or ""} {content or ""}'.lower()
+    return any(marker in normalized for marker in EXTERNAL_VERIFICATION_CODE_STYLE_MARKERS)
+
+
+def find_contextual_external_verification_code(text: str) -> Optional[str]:
+    raw_text = str(text or '')
+    for match in EXTERNAL_VERIFICATION_CODE_RE.finditer(raw_text):
+        start = max(0, match.start() - 160)
+        end = min(len(raw_text), match.end() + 160)
+        if external_verification_has_context(raw_text[start:end]):
+            return match.group(0)
+    return None
+
+
+def find_html_external_verification_code(body_html: str) -> Optional[str]:
+    raw_html = str(body_html or '')
+    for block_match in EXTERNAL_VERIFICATION_CODE_BLOCK_RE.finditer(raw_html):
+        attrs = block_match.group('attrs') or ''
+        content = block_match.group('content') or ''
+        if not external_verification_block_has_code_style(attrs, content):
+            continue
+        context_start = max(0, block_match.start() - 1000)
+        context_html = raw_html[context_start:block_match.end()]
+        if not external_verification_has_context(strip_html_content(context_html)):
+            continue
+        code_match = EXTERNAL_VERIFICATION_CODE_RE.search(strip_html_content(content))
+        if code_match:
+            return code_match.group(0)
+    return None
+
+
+def normalize_external_verification_item_context(account: Dict[str, Any],
+                                                item: Dict[str, Any],
+                                                fallback_folder: str) -> tuple[str, str, str, str]:
+    message_id = str(item.get('id', '') or '')
+    folder = normalize_folder_name(item.get('folder') or fallback_folder or 'inbox')
+    id_mode = str(item.get('id_mode') or item.get('idMode') or '').strip().lower()
+    method = str(item.get('method') or '').strip().lower()
+    if not method:
+        method = 'imap' if account.get('account_type') == 'imap' or id_mode in {'uid', 'sequence'} else 'graph'
+    return message_id, folder, method, id_mode
+
+
+def fetch_external_verification_detail(account: Dict[str, Any],
+                                       item: Dict[str, Any],
+                                       fallback_folder: str) -> Dict[str, Any]:
+    message_id, folder, method, id_mode = normalize_external_verification_item_context(
+        account, item, fallback_folder
+    )
+    if not message_id:
+        return {'success': False, 'error': '获取验证码失败'}
+
+    try:
+        proxy_url = get_account_proxy_url(account)
+        fallback_proxy_urls = get_account_proxy_failover_urls(account)
+        if account.get('account_type') == 'imap':
+            return fetch_imap_account_detail_response(
+                account, folder, message_id, method, id_mode, proxy_url
+            )
+        if method == 'graph' and id_mode not in {'uid', 'sequence'}:
+            result = fetch_graph_detail_response(
+                account, folder, message_id, method, id_mode, proxy_url, fallback_proxy_urls
+            )
+            if result:
+                return result
+        result = fetch_oauth_imap_detail_response(
+            account, folder, message_id, method, id_mode, proxy_url, fallback_proxy_urls
+        )
+        return result or {'success': False, 'error': '获取验证码失败'}
+    except Exception:
+        return {'success': False, 'error': '获取验证码失败'}
+
+
+def extract_external_verification_code(detail_email: Dict[str, Any],
+                                       list_item: Dict[str, Any],
+                                       keyword: str = '') -> Optional[Dict[str, str]]:
+    body_html = str(detail_email.get('body') or '')
+    html_code = find_html_external_verification_code(body_html)
+    if html_code:
+        return {'code': html_code, 'source': 'body'}
+
+    body_text = strip_html_content(body_html)
+    subject = str(detail_email.get('subject') or list_item.get('subject') or '')
+    preview = str(
+        detail_email.get('body_preview')
+        or detail_email.get('bodyPreview')
+        or list_item.get('body_preview')
+        or list_item.get('bodyPreview')
+        or ''
+    )
+    sources = {
+        'body': body_text,
+        'subject': subject,
+        'body_preview': preview,
+    }
+    normalized_keyword = str(keyword or '').strip().lower()
+    if normalized_keyword:
+        haystack = '\n'.join(sources.values()).lower()
+        if normalized_keyword not in haystack:
+            return None
+
+    for source, text in sources.items():
+        code = find_contextual_external_verification_code(str(text or ''))
+        if code:
+            return {'code': code, 'source': source}
+    return None
+
+
+def build_external_verification_base_payload(requested_email: str,
+                                             account: Dict[str, Any],
+                                             checked_count: int,
+                                             throttled: bool) -> Dict[str, Any]:
+    return {
+        'success': True,
+        'email': account.get('email', ''),
+        'requested_email': requested_email,
+        'resolved_email': account.get('email', ''),
+        'checked_count': checked_count,
+        'throttled': throttled,
+    }
+
+
+@app.route('/api/external/verification-code', methods=['GET'])
+@api_key_required
+def api_external_verification_code():
+    requested_email = get_query_arg_preserve_plus('email', '').strip()
+    folder = normalize_folder_name(request.args.get('folder', 'all'))
+    skip = parse_non_negative_int(request.args.get('skip', 0), 0)
+    top = max(1, parse_non_negative_int(request.args.get('top', 5), 5, 20))
+    subject_contains = get_query_arg_preserve_plus('subject_contains', '').strip().lower()
+    from_contains = get_query_arg_preserve_plus('from_contains', '').strip().lower()
+    keyword = get_query_arg_preserve_plus('keyword', '').strip().lower()
+    refresh_requested = parse_external_bool_arg(request.args.get('refresh'))
+
+    if not requested_email:
+        return jsonify({'success': False, 'error': '缺少 email 参数'}), 400
+
+    valid_folders = sorted(VALID_MAIL_FOLDERS)
+    if folder not in VALID_MAIL_FOLDERS:
+        return jsonify({'success': False, 'error': f'folder 参数无效，仅支持 {", ".join(valid_folders)}'}), 400
+
+    account = resolve_account_for_email_api(requested_email)
+    if not account:
+        return jsonify({'success': False, 'error': '邮箱账号不存在'}), 404
+
+    throttled = False
+    if refresh_requested:
+        throttled = check_external_verification_refresh_throttle(account.get('email', ''), folder)
+
+    result = fetch_account_emails(account, folder, skip, top)
+    if not result.get('success'):
+        return jsonify({'success': False, 'error': '获取验证码失败'}), 502
+
+    candidates = [
+        item for item in result.get('emails', [])
+        if external_verification_item_matches(item, subject_contains, from_contains)
+    ]
+
+    checked_count = 0
+    for item in candidates:
+        detail_result = fetch_external_verification_detail(account, item, folder)
+        checked_count += 1
+        if not detail_result.get('success'):
+            continue
+        detail_email = detail_result.get('email') or {}
+        extraction = extract_external_verification_code(detail_email, item, keyword)
+        if not extraction:
+            continue
+
+        message_id, item_folder, method, id_mode = normalize_external_verification_item_context(account, item, folder)
+        payload = build_external_verification_base_payload(
+            requested_email, account, checked_count, throttled
+        )
+        payload.update({
+            'found': True,
+            'code': extraction['code'],
+            'message_id': message_id,
+            'subject': detail_email.get('subject') or item.get('subject', ''),
+            'from': detail_email.get('from') or item.get('from', ''),
+            'folder': item_folder,
+            'method': method,
+            'id_mode': id_mode,
+            'source': extraction['source'],
+            'date': detail_email.get('date') or item.get('date', ''),
+        })
+        return jsonify(payload)
+
+    payload = build_external_verification_base_payload(
+        requested_email, account, checked_count, throttled
+    )
+    payload['found'] = False
+    return jsonify(payload)
+
+
 app.view_functions['api_update_account'] = login_required(api_update_account_v2)
 app.view_functions['api_get_emails'] = login_required(api_get_emails_v2)
 app.view_functions['api_external_get_emails'] = api_key_required(api_external_get_emails_v2)
@@ -1612,6 +1885,7 @@ app.view_functions['api_external_get_emails'] = api_key_required(api_external_ge
 assert_endpoint_protection('api_update_account', '_requires_login', 'login_required')
 assert_endpoint_protection('api_get_emails', '_requires_login', 'login_required')
 assert_endpoint_protection('api_external_get_emails', '_requires_api_key', 'api_key_required')
+assert_endpoint_protection('api_external_verification_code', '_requires_api_key', 'api_key_required')
 
 
 @app.errorhandler(400)

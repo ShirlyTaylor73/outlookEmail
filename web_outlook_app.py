@@ -7,8 +7,10 @@ import threading
 import webbrowser
 from pathlib import Path
 
-from outlook_web.runtime import is_frozen, notify_startup_error, record_startup_error
+from outlook_web.runtime import is_frozen, load_environment_file, notify_startup_error, record_startup_error
 from werkzeug.serving import make_server
+
+load_environment_file()
 
 
 SEGMENT_FILES = (

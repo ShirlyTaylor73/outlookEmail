@@ -5,6 +5,7 @@
         const CLOUDFLARE_GLOBAL_ACCOUNT_KEY = '__cloudflare_global_messages__';
         const CLOUDFLARE_GLOBAL_PAGE_SIZE = 50;
         let currentTempEmailShareTarget = null;
+        let currentAccountShareTarget = null;
 
         // 加载临时邮箱列表
         async function loadTempEmails(forceRefresh = false) {
@@ -299,7 +300,148 @@
             return copyTextToClipboard(url, '分享链接已复制');
         }
 
-        // 生成临时邮箱（显示提供商选择弹窗）
+        // 普通账号分享弹窗
+        function showAccountShareModal(accountId, emailAddress) {
+            currentAccountShareTarget = {
+                id: Number(accountId),
+                email: emailAddress
+            };
+
+            let modal = document.getElementById('accountShareModal');
+            if (!modal) {
+                modal = document.createElement('div');
+                modal.id = 'accountShareModal';
+                modal.className = 'modal';
+                modal.onmousedown = function (e) { if (e.target === modal) hideModal('accountShareModal'); };
+                modal.innerHTML = `
+                    <div class="modal-content" style="width: min(640px, calc(100vw - 32px));">
+                        <div class="modal-header">
+                            <h3>分享邮箱账号</h3>
+                            <button class="modal-close" type="button" onclick="hideModal('accountShareModal')">&times;</button>
+                        </div>
+                        <div class="modal-body">
+                            <div class="temp-email-share-meta" id="accountShareAddress"></div>
+                            <div class="form-group">
+                                <label class="form-label" for="accountShareExpiry">有效期</label>
+                                <select class="form-input" id="accountShareExpiry">
+                                    <option value="3600000">1 小时</option>
+                                    <option value="86400000">1 天</option>
+                                    <option value="259200000">3 天</option>
+                                    <option value="2592000000" selected>30 天</option>
+                                    <option value="0">永久</option>
+                                </select>
+                            </div>
+                            <button class="btn btn-primary" type="button" onclick="createAccountShare()">创建分享链接</button>
+                            <div class="temp-email-share-list" id="accountShareList"></div>
+                        </div>
+                    </div>
+                `;
+                document.body.appendChild(modal);
+            }
+
+            const addressEl = document.getElementById('accountShareAddress');
+            if (addressEl) addressEl.textContent = emailAddress;
+            const expiryEl = document.getElementById('accountShareExpiry');
+            if (expiryEl) expiryEl.value = '2592000000';
+            showModal('accountShareModal');
+            loadAccountShares();
+        }
+
+        async function loadAccountShares() {
+            const list = document.getElementById('accountShareList');
+            if (!list || !currentAccountShareTarget) return;
+            list.innerHTML = '<div class="loading loading-small"><div class="loading-spinner"></div></div>';
+
+            try {
+                const response = await fetch(`/api/accounts/${currentAccountShareTarget.id}/shares`);
+                const data = await response.json();
+                if (!data.success) {
+                    handleApiError(data, '加载分享链接失败');
+                    list.innerHTML = '<div class="temp-email-share-meta">加载失败</div>';
+                    return;
+                }
+
+                const shares = Array.isArray(data.shares) ? data.shares : [];
+                if (shares.length === 0) {
+                    list.innerHTML = '<div class="temp-email-share-meta">暂无分享链接</div>';
+                    return;
+                }
+
+                list.innerHTML = shares.map(share => {
+                    const url = `${window.location.origin}/shared/${share.token}`;
+                    const expiresAt = share.expires_at ? formatAbsoluteDateTime(share.expires_at) : '永久';
+                    return `
+                        <div class="temp-email-share-item">
+                            <div class="temp-email-share-url" title="${escapeHtml(url)}">${escapeHtml(url)}</div>
+                            <div class="temp-email-share-meta">
+                                创建：${escapeHtml(formatAbsoluteDateTime(share.created_at) || '-')} · 过期：${escapeHtml(expiresAt || '永久')}
+                            </div>
+                            <div class="temp-email-share-actions">
+                                <button class="btn btn-secondary btn-sm" type="button" onclick="copyAccountShareLink('${escapeJs(share.token)}')">复制</button>
+                                <button class="btn btn-danger btn-sm" type="button" onclick="deleteAccountShare(${Number(share.id)})">删除</button>
+                            </div>
+                        </div>
+                    `;
+                }).join('');
+            } catch (error) {
+                list.innerHTML = '<div class="temp-email-share-meta">加载失败</div>';
+                showToast('加载分享链接失败', 'error');
+            }
+        }
+
+        async function createAccountShare() {
+            if (!currentAccountShareTarget) return;
+            const expiryEl = document.getElementById('accountShareExpiry');
+            const expiresIn = Number(expiryEl ? expiryEl.value : 2592000000);
+
+            try {
+                const response = await fetch(`/api/accounts/${currentAccountShareTarget.id}/shares`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ expires_in: expiresIn })
+                });
+                const data = await response.json();
+                if (data.success) {
+                    showToast('分享链接已创建', 'success');
+                    loadAccountShares();
+                } else {
+                    handleApiError(data, '创建分享链接失败');
+                }
+            } catch (error) {
+                showToast('创建分享链接失败', 'error');
+            }
+        }
+
+        async function deleteAccountShare(shareId) {
+            if (!currentAccountShareTarget) return;
+            const shareModal = document.getElementById('accountShareModal');
+            const restoreShareModal = !!shareModal && shareModal.classList.contains('show');
+            if (restoreShareModal) setModalVisible('accountShareModal', false);
+            const confirmed = await showConfirmModal('确定要删除这个分享链接吗？', { title: '删除分享链接', confirmText: '确认删除' });
+            if (restoreShareModal) setModalVisible('accountShareModal', true);
+            if (!confirmed) return;
+
+            try {
+                const response = await fetch(`/api/accounts/${currentAccountShareTarget.id}/shares/${shareId}`, {
+                    method: 'DELETE'
+                });
+                const data = await response.json();
+                if (data.success) {
+                    showToast('分享链接已删除', 'success');
+                    loadAccountShares();
+                } else {
+                    handleApiError(data, '删除分享链接失败');
+                }
+            } catch (error) {
+                showToast('删除分享链接失败', 'error');
+            }
+        }
+
+        function copyAccountShareLink(token) {
+            const url = `${window.location.origin}/shared/${token}`;
+            return copyTextToClipboard(url, '分享链接已复制');
+        }
+
         async function generateTempEmail() {
             // 显示提供商选择弹窗
             showTempEmailProviderModal();

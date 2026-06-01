@@ -3,6 +3,7 @@ const token = document.body.dataset.shareToken;
 const sharedState = {
     selectedMessageId: null,
     loading: false,
+    shareType: 'temp_email',
 };
 
 function escapeHtml(value) {
@@ -62,14 +63,22 @@ async function loadSharedTempEmail() {
     try {
         const data = await fetchSharedJson(`/api/shared/${encodeURIComponent(token)}`);
         const email = data.email || {};
+        sharedState.shareType = data.share_type || 'temp_email';
         const addressEl = document.getElementById('sharedEmailAddress');
         const expiresEl = document.getElementById('sharedExpiresAt');
+        const workbenchEl = document.getElementById('sharedWorkbench');
+        const defaultName = sharedState.shareType === 'account' ? '邮箱账号' : '临时邮箱';
+
+        document.title = sharedState.shareType === 'account' ? '邮箱账号分享' : '临时邮箱分享';
+        if (workbenchEl) {
+            workbenchEl.setAttribute('aria-label', `${defaultName}分享内容`);
+        }
 
         if (addressEl) {
-            addressEl.textContent = email.email || '临时邮箱';
+            addressEl.textContent = email.email || defaultName;
         }
         if (expiresEl) {
-            const provider = email.provider_label || email.provider || '临时邮箱';
+            const provider = email.provider_label || email.provider || defaultName;
             const expires = email.expires_at ? `有效期至 ${formatSharedDate(email.expires_at)}` : '永久有效';
             expiresEl.textContent = `${provider} · ${expires}`;
         }
@@ -145,8 +154,11 @@ function renderSharedMessageList(emails) {
         const id = escapeHtml(email.id || '');
         const selected = email.id === sharedState.selectedMessageId ? ' is-selected' : '';
         const htmlBadge = email.has_html ? '<span class="message-badge">HTML</span>' : '';
+        const folder = escapeHtml(email.folder || 'inbox');
+        const method = escapeHtml(email.method || '');
+        const idMode = escapeHtml(email.id_mode || '');
         return `
-            <button class="message-item${selected}" type="button" data-message-id="${id}">
+            <button class="message-item${selected}" type="button" data-message-id="${id}" data-folder="${folder}" data-method="${method}" data-id-mode="${idMode}">
                 <span class="message-row">
                     <span class="message-from">${escapeHtml(email.from || '未知发件人')}</span>
                     ${htmlBadge}
@@ -159,11 +171,16 @@ function renderSharedMessageList(emails) {
     }).join('');
 
     listEl.querySelectorAll('[data-message-id]').forEach((item) => {
-        item.addEventListener('click', () => loadSharedMessageDetail(item.dataset.messageId));
+        item.addEventListener('click', () => loadSharedMessageDetail(
+            item.dataset.messageId,
+            item.dataset.folder,
+            item.dataset.method,
+            item.dataset.idMode
+        ));
     });
 }
 
-async function loadSharedMessageDetail(messageId) {
+async function loadSharedMessageDetail(messageId, folder = '', method = '', idMode = '') {
     if (!messageId) {
         return;
     }
@@ -178,8 +195,13 @@ async function loadSharedMessageDetail(messageId) {
     }
 
     try {
+        const params = new URLSearchParams();
+        if (folder) params.set('folder', folder);
+        if (method) params.set('method', method);
+        if (idMode) params.set('id_mode', idMode);
+        const query = params.toString() ? `?${params.toString()}` : '';
         const data = await fetchSharedJson(
-            `/api/shared/${encodeURIComponent(token)}/messages/${encodeURIComponent(messageId)}`
+            `/api/shared/${encodeURIComponent(token)}/messages/${encodeURIComponent(messageId)}${query}`
         );
         renderSharedMessageDetail(data.email || {});
     } catch (error) {
@@ -238,7 +260,11 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     try {
         await loadSharedTempEmail();
-        await loadSharedMessages();
+        if (sharedState.shareType === 'account') {
+            await refreshSharedMessages();
+        } else {
+            await loadSharedMessages();
+        }
     } catch (error) {
         // Individual loaders have already rendered the public error state.
     }

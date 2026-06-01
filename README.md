@@ -50,12 +50,13 @@ docker run -d \
 git clone https://github.com/assast/outlookEmail.git
 cd outlookEmail
 pip install -r requirements.txt
-export SECRET_KEY=your-secret-key-here
+cp .env.example .env
+# 编辑 .env，至少设置固定 SECRET_KEY
 python web_outlook_app.py
 ```
 
-访问 `http://localhost:5000` 即可使用。
-如果是服务器部署，仍然建议显式设置固定 `SECRET_KEY`。
+启动时会自动读取项目根目录下的 `.env`。访问 `http://localhost:5000` 即可使用。
+如果是服务器部署，也可以继续通过环境变量显式设置固定 `SECRET_KEY`，真实环境变量会优先于 `.env`。
 
 ### 运行模式
 
@@ -472,6 +473,7 @@ user@example.com----app-password----imap.example.com----993
 - 使用主邮箱或别名邮箱取信
 - `folder=all` 一次聚合收件箱和垃圾邮件并按标准化后的邮件时间倒序排序，`top` 按每个文件夹分别计算
 - 支持按主题、发件人、关键词筛选列表
+- 支持验证码专用接口，从候选邮件完整正文中提取 6 位数字验证码
 - 支持特殊字符别名，例如 `user+alias@example.com`
 - 查询 `@gmail.com` / `@googlemail.com` 地址时，原后缀未命中会自动回退到另一个后缀
 - 默认 `top=1`
@@ -493,6 +495,9 @@ curl -H "X-API-Key: your-api-key" \
 
 curl -H "X-API-Key: your-api-key" \
   "http://localhost:5000/api/external/emails?email=user%2Balias%40example.com"
+
+curl -H "X-API-Key: your-api-key" \
+  "http://localhost:5000/api/external/verification-code?email=user@outlook.com&folder=all&refresh=1&subject_contains=verify&top=5"
 ```
 
 如果邮箱或别名里带特殊字符：
@@ -502,6 +507,8 @@ curl -H "X-API-Key: your-api-key" \
 - `&` 必须编码成 `%26`
 
 如果你把外部邮箱 B 自动转发到本项目管理的邮箱 A，再把 B 配成 A 的别名，那么后续可以直接用 B 作为 `email` 参数调用对外 API。
+
+验证码接口只返回验证码和命中邮件元信息，不返回完整正文、附件、原始邮件或账号凭据。`refresh=1` 会按邮箱和文件夹 30 秒节流。
 
 详细文档见 [API 文档](docs/api.md)。
 

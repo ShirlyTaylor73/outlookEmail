@@ -1085,6 +1085,54 @@ def init_db():
             FOREIGN KEY(temp_email_id) REFERENCES temp_emails(id)
         )
     ''')
+
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS account_shares (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            account_id INTEGER NOT NULL,
+            token TEXT NOT NULL UNIQUE,
+            expires_at TIMESTAMP,
+            last_refreshed_at TIMESTAMP,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY(account_id) REFERENCES accounts(id) ON DELETE CASCADE
+        )
+    ''')
+
+    account_share_fk_rows = cursor.execute('PRAGMA foreign_key_list(account_shares)').fetchall()
+    account_share_fk = next(
+        (row for row in account_share_fk_rows if row[2] == 'accounts' and row[3] == 'account_id'),
+        None
+    )
+    if account_share_fk and str(account_share_fk[6]).upper() != 'CASCADE':
+        conn.commit()
+        conn.execute('PRAGMA foreign_keys = OFF')
+        cursor.execute('ALTER TABLE account_shares RENAME TO account_shares_old')
+        cursor.execute('''
+            CREATE TABLE account_shares (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                account_id INTEGER NOT NULL,
+                token TEXT NOT NULL UNIQUE,
+                expires_at TIMESTAMP,
+                last_refreshed_at TIMESTAMP,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY(account_id) REFERENCES accounts(id) ON DELETE CASCADE
+            )
+        ''')
+        cursor.execute('''
+            INSERT OR IGNORE INTO account_shares (
+                id, account_id, token, expires_at, last_refreshed_at, created_at, updated_at
+            )
+            SELECT id, account_id, token, expires_at, last_refreshed_at, created_at, updated_at
+            FROM account_shares_old
+            WHERE EXISTS (
+                SELECT 1 FROM accounts WHERE accounts.id = account_shares_old.account_id
+            )
+        ''')
+        cursor.execute('DROP TABLE account_shares_old')
+        conn.commit()
+        conn.execute('PRAGMA foreign_keys = ON')
     
     # 创建临时邮件表（存储从 GPTMail 获取的邮件）
     cursor.execute('''
@@ -1858,6 +1906,16 @@ def init_db():
     cursor.execute('''
         CREATE INDEX IF NOT EXISTS idx_temp_email_shares_token
         ON temp_email_shares(token)
+    ''')
+
+    cursor.execute('''
+        CREATE INDEX IF NOT EXISTS idx_account_shares_account_id
+        ON account_shares(account_id)
+    ''')
+
+    cursor.execute('''
+        CREATE INDEX IF NOT EXISTS idx_account_shares_token
+        ON account_shares(token)
     ''')
 
     cursor.execute('''

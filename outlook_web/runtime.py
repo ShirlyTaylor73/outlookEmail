@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import os
+import re
 import secrets
 import sys
 import traceback
@@ -15,6 +16,8 @@ APP_NAME = "OutlookEmail"
 SECRET_KEY_FILE = "secret_key.txt"
 DATABASE_FILE = "outlook_accounts.db"
 STARTUP_LOG_FILE = "startup-error.log"
+ENV_FILE = ".env"
+ENV_KEY_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 def is_frozen() -> bool:
@@ -48,6 +51,41 @@ def runtime_root() -> Path:
 
 def resource_path(*parts: str) -> Path:
     return bundle_root().joinpath(*parts)
+
+
+def _decode_env_value(value: str) -> str:
+    value = value.strip()
+    quote = value[0] if value else ""
+    if len(value) >= 2 and quote == value[-1] and quote in ("'", '"'):
+        value = value[1:-1]
+    return value
+
+
+def load_environment_file(env_file: str | os.PathLike[str] | None = None) -> Path | None:
+    """Load .env values before app bootstrap, without overriding real env vars."""
+    configured = env_file or os.getenv("OUTLOOK_EMAIL_ENV_FILE")
+    candidates = [Path(configured).expanduser()] if configured else [runtime_root() / ENV_FILE]
+
+    for candidate in candidates:
+        if not candidate.is_file():
+            continue
+
+        for raw_line in candidate.read_text(encoding="utf-8").splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            if line.startswith("export "):
+                line = line[7:].lstrip()
+
+            key, value = line.split("=", 1)
+            key = key.strip()
+            if not ENV_KEY_PATTERN.match(key):
+                continue
+            os.environ.setdefault(key, _decode_env_value(value))
+
+        return candidate
+
+    return None
 
 
 def default_database_path() -> Path:
