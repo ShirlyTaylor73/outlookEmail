@@ -412,6 +412,12 @@ MAIL_PROVIDERS = {
         "imap_port": 993,
         "account_type": "imap",
     },
+    "icloud_hme": {
+        "label": "iCloud Hide My Email",
+        "imap_host": "",
+        "imap_port": 993,
+        "account_type": "icloud_hme",
+    },
     "custom": {
         "label": "自定义 IMAP",
         "imap_host": "",
@@ -469,6 +475,11 @@ PROVIDER_FOLDER_MAP = {
         "inbox": ["INBOX", "Inbox"],
         "junkemail": ["&V4NXPnux-", "Junk", "Junk Email", "Spam", "SPAM"],
         "deleteditems": ["&XfJT0ZAB-", "Trash", "Deleted", "Deleted Items", "Deleted Messages"],
+    },
+    "icloud_hme": {
+        "inbox": ["INBOX", "Inbox"],
+        "junkemail": ["Junk", "Junk Email", "Spam", "SPAM", "Bulk Mail"],
+        "deleteditems": ["Trash", "Deleted", "Deleted Items", "Deleted Messages"],
     },
     "_default": {
         "inbox": ["INBOX", "Inbox"],
@@ -1047,6 +1058,7 @@ def init_db():
             proxy_url TEXT DEFAULT '',
             fallback_proxy_url_1 TEXT DEFAULT '',
             fallback_proxy_url_2 TEXT DEFAULT '',
+            icloud_hme_source_id INTEGER,
             last_refresh_at TIMESTAMP,
             last_refresh_status TEXT DEFAULT 'never',
             last_refresh_error TEXT,
@@ -1056,7 +1068,29 @@ def init_db():
             FOREIGN KEY (group_id) REFERENCES groups (id)
         )
     ''')
-    
+
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS icloud_hme_sources (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            region TEXT DEFAULT '',
+            receiver_email TEXT NOT NULL,
+            receiver_provider TEXT DEFAULT 'custom',
+            receiver_imap_host TEXT DEFAULT '',
+            receiver_imap_port INTEGER DEFAULT 993,
+            receiver_imap_password TEXT DEFAULT '',
+            receiver_folder TEXT DEFAULT 'inbox',
+            use_ssl INTEGER DEFAULT 1,
+            cookie TEXT DEFAULT '',
+            maildomain_host TEXT DEFAULT '',
+            last_sync_at TIMESTAMP,
+            last_sync_status TEXT DEFAULT 'never',
+            last_sync_error TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+
     # 创建临时邮箱表
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS temp_emails (
@@ -1453,6 +1487,8 @@ def init_db():
         cursor.execute('ALTER TABLE accounts ADD COLUMN fallback_proxy_url_1 TEXT')
     if 'fallback_proxy_url_2' not in columns:
         cursor.execute('ALTER TABLE accounts ADD COLUMN fallback_proxy_url_2 TEXT')
+    if 'icloud_hme_source_id' not in columns:
+        cursor.execute('ALTER TABLE accounts ADD COLUMN icloud_hme_source_id INTEGER')
     
     # 检查 groups 表是否有 is_system 列
     cursor.execute("PRAGMA table_info(groups)")
@@ -1863,6 +1899,16 @@ def init_db():
     cursor.execute('''
         CREATE INDEX IF NOT EXISTS idx_accounts_group_email_nocase
         ON accounts(group_id, email COLLATE NOCASE)
+    ''')
+
+    cursor.execute('''
+        CREATE INDEX IF NOT EXISTS idx_icloud_hme_sources_receiver
+        ON icloud_hme_sources(receiver_email COLLATE NOCASE)
+    ''')
+
+    cursor.execute('''
+        CREATE INDEX IF NOT EXISTS idx_accounts_icloud_hme_source_id
+        ON accounts(icloud_hme_source_id)
     ''')
 
     cursor.execute('''

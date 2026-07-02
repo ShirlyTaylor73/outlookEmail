@@ -624,6 +624,25 @@ class ProjectRuntimeTests(unittest.TestCase):
 
         self.assertIn('sort_order', columns)
 
+    def test_init_db_creates_icloud_hme_schema(self):
+        with self.app.app_context():
+            db = web_outlook_app.get_db()
+            source_columns = {
+                row[1] for row in db.execute("PRAGMA table_info(icloud_hme_sources)").fetchall()
+            }
+            account_columns = {
+                row[1] for row in db.execute("PRAGMA table_info(accounts)").fetchall()
+            }
+            indexes = {
+                row[1] for row in db.execute("PRAGMA index_list(icloud_hme_sources)").fetchall()
+            }
+
+        self.assertIn("receiver_email", source_columns)
+        self.assertIn("receiver_imap_password", source_columns)
+        self.assertIn("cookie", source_columns)
+        self.assertIn("icloud_hme_source_id", account_columns)
+        self.assertIn("idx_icloud_hme_sources_receiver", indexes)
+
     def test_init_db_creates_retained_normal_mail_schema(self):
         expected_columns = {
             'account_id',
