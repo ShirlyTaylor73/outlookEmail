@@ -973,14 +973,15 @@ def api_external_get_accounts():
 
     safe_accounts = []
     for acc in accounts:
-        safe_accounts.append(
-            serialize_account_summary(
-                acc,
-                {},
-                include_client_meta=False,
-                include_imap_meta=False
-            )
+        summary = serialize_account_summary(
+            acc,
+            {},
+            include_client_meta=False,
+            include_imap_meta=False
         )
+        if summary.get('account_type') == 'icloud_hme' or summary.get('provider') == 'icloud_hme':
+            summary['resource_type'] = MAILBOX_TYPE_ACCOUNT
+        safe_accounts.append(summary)
 
     return jsonify({
         'success': True,

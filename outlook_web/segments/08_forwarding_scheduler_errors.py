@@ -1559,6 +1559,17 @@ def email_matches_filters(account: Dict[str, Any], item: Dict[str, Any],
 
     proxy_url = get_account_proxy_url(account)
     fallback_proxy_urls = get_account_proxy_failover_urls(account)
+    if account.get('account_type') == 'icloud_hme':
+        message_id, detail_folder, method, id_mode = normalize_external_verification_item_context(
+            account, item, item.get('folder', 'inbox')
+        )
+        detail_payload = fetch_icloud_hme_account_detail_response(
+            account, detail_folder, message_id, method, id_mode, proxy_url
+        )
+        if detail_payload and detail_payload.get('success'):
+            body = str((detail_payload.get('email') or {}).get('body', '') or '')
+            return keyword in strip_html_content(body).lower()
+        return False
     if account.get('account_type') == 'imap':
         detail_payload = get_email_detail_imap_generic_result(
             account['email'],
@@ -1723,7 +1734,11 @@ def normalize_external_verification_item_context(account: Dict[str, Any],
     id_mode = str(item.get('id_mode') or item.get('idMode') or '').strip().lower()
     method = str(item.get('method') or '').strip().lower()
     if not method:
-        method = 'imap' if account.get('account_type') == 'imap' or id_mode in {'uid', 'sequence'} else 'graph'
+        method = (
+            'imap'
+            if account.get('account_type') in {'imap', 'icloud_hme'} or id_mode in {'uid', 'sequence'}
+            else 'graph'
+        )
     return message_id, folder, method, id_mode
 
 
@@ -1739,6 +1754,10 @@ def fetch_external_verification_detail(account: Dict[str, Any],
     try:
         proxy_url = get_account_proxy_url(account)
         fallback_proxy_urls = get_account_proxy_failover_urls(account)
+        if account.get('account_type') == 'icloud_hme':
+            return fetch_icloud_hme_account_detail_response(
+                account, folder, message_id, method, id_mode, proxy_url
+            )
         if account.get('account_type') == 'imap':
             return fetch_imap_account_detail_response(
                 account, folder, message_id, method, id_mode, proxy_url
