@@ -699,6 +699,100 @@
         </div>
     </div>
 
+    <!-- iCloud HME 源管理模态框 -->
+    <div class="modal" id="icloudHmeSourceModal" onmousedown="if(event.target === this) hideIcloudHmeSourceModal()">
+        <div class="modal-content hme-source-modal-content">
+            <div class="modal-header">
+                <h3 id="icloudHmeSourceModalTitle">管理 iCloud HME 源</h3>
+                <button class="modal-close" onclick="hideIcloudHmeSourceModal()">&times;</button>
+            </div>
+            <div class="modal-body hme-source-modal-body">
+                <div class="hme-source-layout">
+                    <aside class="hme-source-list-panel">
+                        <div class="hme-source-list-head">
+                            <div>
+                                <strong>HME 源</strong>
+                                <p>接收邮箱、IMAP 与同步入口</p>
+                            </div>
+                            <button class="btn btn-sm btn-secondary" type="button" onclick="openIcloudHmeSourceModal()">新建</button>
+                        </div>
+                        <div class="hme-source-list" id="icloudHmeSourceList">
+                            <div class="hme-source-empty">加载中...</div>
+                        </div>
+                    </aside>
+                    <section class="hme-source-form-panel">
+                        <input type="hidden" id="icloudHmeSourceId">
+                        <div class="settings-panel-grid">
+                            <div class="form-group">
+                                <label class="form-label">源名称</label>
+                                <input type="text" class="form-input" id="icloudHmeSourceName" placeholder="主接收邮箱">
+                            </div>
+                            <div class="form-group">
+                                <label class="form-label">区域</label>
+                                <select class="form-select" id="icloudHmeSourceRegion">
+                                    <option value="global">Global</option>
+                                    <option value="cn">China</option>
+                                </select>
+                            </div>
+                            <div class="form-group">
+                                <label class="form-label">接收邮箱</label>
+                                <input type="email" class="form-input" id="icloudHmeReceiverEmail" placeholder="receiver@example.com">
+                            </div>
+                            <div class="form-group">
+                                <label class="form-label">接收邮箱类型</label>
+                                <select class="form-select" id="icloudHmeReceiverProvider">
+                                    <option value="custom">自定义 IMAP</option>
+                                    <option value="icloud">iCloud</option>
+                                    <option value="gmail">Gmail</option>
+                                    <option value="outlook">Outlook</option>
+                                </select>
+                            </div>
+                            <div class="form-group">
+                                <label class="form-label">IMAP 服务器</label>
+                                <input type="text" class="form-input" id="icloudHmeReceiverImapHost" placeholder="imap.example.com">
+                            </div>
+                            <div class="form-group">
+                                <label class="form-label">IMAP 端口</label>
+                                <input type="number" class="form-input" id="icloudHmeReceiverImapPort" value="993" min="1" max="65535">
+                            </div>
+                            <div class="form-group">
+                                <label class="form-label">IMAP 密码 / 授权码</label>
+                                <input type="password" class="form-input" id="icloudHmeReceiverImapPassword" autocomplete="new-password">
+                            </div>
+                            <div class="form-group">
+                                <label class="form-label">接收文件夹</label>
+                                <input type="text" class="form-input" id="icloudHmeReceiverFolder" value="INBOX">
+                            </div>
+                            <div class="form-group">
+                                <label class="settings-toggle settings-toggle--card">
+                                    <input type="checkbox" id="icloudHmeUseSsl" checked>
+                                    <span class="form-label">使用 SSL 连接 IMAP</span>
+                                </label>
+                            </div>
+                            <div class="form-group">
+                                <label class="form-label">Maildomain Host</label>
+                                <input type="text" class="form-input" id="icloudHmeMaildomainHost" placeholder="maildomain.icloud.com">
+                            </div>
+                            <div class="form-group settings-form-span-full">
+                                <label class="form-label">iCloud Cookie</label>
+                                <textarea class="form-textarea hme-source-secret" id="icloudHmeCookie" placeholder="用于同步 Hide My Email 地址"></textarea>
+                            </div>
+                        </div>
+                        <div class="settings-action-row hme-source-actions">
+                            <button class="btn btn-secondary" type="button" onclick="testIcloudHmeSourceImap()">测试 IMAP</button>
+                            <button class="btn btn-secondary" type="button" id="icloudHmeSourceSyncBtn" onclick="syncIcloudHmeSource()">同步 HME</button>
+                            <button class="btn btn-danger" type="button" id="icloudHmeSourceDeleteBtn" onclick="deleteIcloudHmeSource()">删除源</button>
+                            <button class="btn btn-primary" type="button" onclick="saveIcloudHmeSource()">保存源</button>
+                        </div>
+                    </section>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-secondary" onclick="hideIcloudHmeSourceModal()">关闭</button>
+            </div>
+        </div>
+    </div>
+
     <!-- 标签管理模态框 -->
     <div class="modal" id="tagManagementModal" onmousedown="if(event.target === this) hideTagManagementModal()">
         <div class="modal-content">

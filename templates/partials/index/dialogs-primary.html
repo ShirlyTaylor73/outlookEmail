@@ -120,6 +120,7 @@
                                     <option value="yahoo">Yahoo</option>
                                     <option value="aliyun">Aliyun</option>
                                     <option value="2925">2925邮箱</option>
+                                    <option value="icloud_hme">iCloud Hide My Email</option>
                                     <option value="custom">自定义 IMAP</option>
                                 </select>
                             </div>
@@ -132,6 +133,14 @@
                                     <label class="form-label">IMAP 端口</label>
                                     <input type="number" class="form-input" id="importImapPort" value="993" min="1" max="65535">
                                 </div>
+                            </div>
+                            <div class="form-group import-hme-source-group" id="importHmeSourceGroup" style="display: none;">
+                                <label class="form-label">iCloud HME 源</label>
+                                <div class="hme-source-picker">
+                                    <select class="form-select" id="importIcloudHmeSourceSelect"></select>
+                                    <button class="btn btn-secondary" type="button" onclick="openIcloudHmeSourceModal()">管理 HME 源</button>
+                                </div>
+                                <div class="form-hint">接收 IMAP、Cookie 与同步设置在 HME 源中统一管理。</div>
                             </div>
                             <div class="form-group import-account-default-field">
                                 <label class="form-label">备注</label>
@@ -211,6 +220,7 @@
                         <option value="yahoo">Yahoo</option>
                         <option value="aliyun">Aliyun</option>
                         <option value="2925">2925邮箱</option>
+                        <option value="icloud_hme">iCloud Hide My Email</option>
                         <option value="custom">自定义 IMAP</option>
                     </select>
                 </div>
@@ -241,6 +251,14 @@
                             <input type="number" class="form-input" id="editImapPort" value="993" min="1" max="65535">
                         </div>
                     </div>
+                </div>
+                <div class="form-group" id="editHmeSourceGroup" style="display: none;">
+                    <label class="form-label">iCloud HME 源</label>
+                    <div class="hme-source-picker">
+                        <select class="form-select" id="editIcloudHmeSourceSelect"></select>
+                        <button class="btn btn-secondary" type="button" onclick="openIcloudHmeSourceModal()">管理 HME 源</button>
+                    </div>
+                    <div class="form-hint">HME 账号共用所选源的接收 IMAP 配置。</div>
                 </div>
                 <div class="form-group">
                     <label class="form-label">所属分组</label>

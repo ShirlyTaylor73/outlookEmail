@@ -1,4 +1,4 @@
-        /* global ACCOUNT_LIST_DEFAULT_PAGE_SIZE, ACCOUNT_LIST_MAX_PAGE_SIZE, accountListPageSize, accountListRequestSeq, accountPaginationState, accountSelectionMode, accountsCache, closeAllModals, currentAccount, currentAccountListSource, currentEmailDetail, currentEmailId, currentEmails, currentGroupId, currentSkip, currentSortBy, currentSortOrder, deleteAccount, editingGroupId, escapeHtml, formatAbsoluteDateTime, generateTempEmail, groups, handleAccountRowSelectionClick, handleAccountSelectionCheckboxClick, handleApiError, hasMoreEmails, hideModal, isMobileLayout, isTempEmailGroup, loadTempEmails, localStorage, matchesSelectedTagFilters, normalizeTagFilterSelectionValue, openMobilePanel, renderEmptyStateMarkup, renderTempEmailList, resetSelectedAccountView, selectedColor, selectedTagFilters, setModalVisible, shouldShowAccountCreatedAt, shouldShowAccountSortOrder, showAddAccountModal, showGetRefreshTokenModal, showModal, showRefreshError, showTagManagementModal, showToast, suppressGroupClickUntil, tempEmailGroupId, toggleAccountSelectionMode, updateCurrentGroupHeader, updateMobileContext */
+        /* global ACCOUNT_LIST_DEFAULT_PAGE_SIZE, ACCOUNT_LIST_MAX_PAGE_SIZE, accountListPageSize, accountListRequestSeq, accountPaginationState, accountSelectionMode, accountsCache, closeAllModals, currentAccount, currentAccountListSource, currentEmailDetail, currentEmailId, currentEmails, currentGroupId, currentSkip, currentSortBy, currentSortOrder, deleteAccount, editingGroupId, escapeHtml, formatAbsoluteDateTime, generateTempEmail, groups, handleAccountRowSelectionClick, handleAccountSelectionCheckboxClick, handleApiError, hasMoreEmails, hideModal, isMobileLayout, isTempEmailGroup, loadIcloudHmeSources, loadTempEmails, localStorage, matchesSelectedTagFilters, normalizeTagFilterSelectionValue, openIcloudHmeSourceModal, openMobilePanel, renderEmptyStateMarkup, renderTempEmailList, resetSelectedAccountView, selectedColor, selectedTagFilters, setModalVisible, shouldShowAccountCreatedAt, shouldShowAccountSortOrder, showAddAccountModal, showGetRefreshTokenModal, showModal, showRefreshError, showTagManagementModal, showToast, suppressGroupClickUntil, tempEmailGroupId, toggleAccountSelectionMode, updateCurrentGroupHeader, updateMobileContext */
 
         // ==================== 分组相关 ====================
 
@@ -926,7 +926,7 @@
                     <input type="checkbox" class="account-select-checkbox" value="${acc.id}" 
                            data-account-email="${escapeHtml(acc.email)}"
                            data-account-type="${escapeHtml(acc.account_type || 'outlook')}"
-                           data-refreshable="${acc.account_type !== 'imap' ? 'true' : 'false'}"
+                           data-refreshable="${acc.account_type !== 'imap' && acc.account_type !== 'icloud_hme' ? 'true' : 'false'}"
                            data-forward-enabled="${acc.forward_enabled ? 'true' : 'false'}"
                            onclick="handleAccountSelectionCheckboxClick(event)">
                     <div class="account-body">
@@ -1427,6 +1427,7 @@
             yahoo: 'Yahoo',
             aliyun: 'Aliyun',
             '2925': '2925邮箱',
+            icloud_hme: 'iCloud HME',
             custom: 'Custom IMAP'
         };
 
@@ -1553,17 +1554,23 @@
         function updateEditAccountFields() {
             const provider = document.getElementById('editProviderSelect')?.value || 'outlook';
             const isOutlook = provider === 'outlook';
+            const isIcloudHme = provider === 'icloud_hme';
             const passwordGroup = document.getElementById('editPassword')?.closest('.form-group');
             const clientIdGroup = document.getElementById('editClientId')?.closest('.form-group');
             const refreshTokenGroup = document.getElementById('editRefreshToken')?.closest('.form-group');
             const imapFields = document.getElementById('editImapFields');
             const customImapFields = document.getElementById('editCustomImapFields');
+            const hmeSourceGroup = document.getElementById('editHmeSourceGroup');
 
             if (passwordGroup) passwordGroup.style.display = isOutlook ? '' : 'none';
             if (clientIdGroup) clientIdGroup.style.display = isOutlook ? '' : 'none';
             if (refreshTokenGroup) refreshTokenGroup.style.display = isOutlook ? '' : 'none';
-            if (imapFields) imapFields.style.display = isOutlook ? 'none' : '';
+            if (imapFields) imapFields.style.display = isOutlook || isIcloudHme ? 'none' : '';
             if (customImapFields) customImapFields.style.display = provider === 'custom' ? '' : 'none';
+            if (hmeSourceGroup) hmeSourceGroup.style.display = isIcloudHme ? '' : 'none';
+            if (isIcloudHme && typeof loadIcloudHmeSources === 'function') {
+                loadIcloudHmeSources();
+            }
         }
 
         function updateImportHint() {
@@ -1577,6 +1584,7 @@
             const customImapSettings = document.getElementById('customImapSettings');
             const customHost = document.getElementById('importImapHost');
             const customPort = document.getElementById('importImapPort');
+            const hmeSourceGroup = document.getElementById('importHmeSourceGroup');
             const accountDefaultFields = document.querySelectorAll('#addAccountModal .import-account-default-field');
             if (!hintEl || !inputEl) return;
 
@@ -1589,6 +1597,7 @@
 
             if (isTempGroup) {
                 if (customImapSettings) customImapSettings.style.display = 'none';
+                if (hmeSourceGroup) hmeSourceGroup.style.display = 'none';
                 const channel = channelSelect ? channelSelect.value : 'gptmail';
                 if (channel === 'duckmail') {
                     hintEl.textContent = '格式：邮箱----密码，每行一个。';
@@ -1620,7 +1629,20 @@
             const provider = providerSelect ? providerSelect.value : 'outlook';
             const isOutlook = provider === 'outlook';
             if (customImapSettings) customImapSettings.style.display = provider === 'custom' ? '' : 'none';
+            if (hmeSourceGroup) hmeSourceGroup.style.display = provider === 'icloud_hme' ? '' : 'none';
             if (exampleEl) exampleEl.style.display = '';
+
+            if (provider === 'icloud_hme') {
+                hintEl.textContent = '格式：HME地址 或 HME地址----备注，每行一个。接收 IMAP 配置在 iCloud HME 源中管理。';
+                inputEl.placeholder = 'alias@icloud.com\nalias2@icloud.com----备注';
+                if (exampleEl) {
+                    exampleEl.textContent = '示例：\nalias@icloud.com\nalias2@icloud.com----项目备注';
+                }
+                if (typeof loadIcloudHmeSources === 'function') {
+                    loadIcloudHmeSources();
+                }
+                return;
+            }
 
             if (isOutlook) {
                 hintEl.textContent = 'Outlook 支持两种格式并自动识别：邮箱----密码----client_id----refresh_token 或 邮箱----密码----refresh_token----client_id。';

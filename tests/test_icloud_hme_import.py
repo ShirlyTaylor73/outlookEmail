@@ -4,6 +4,7 @@ import sqlite3
 import sys
 import tempfile
 import unittest
+from pathlib import Path
 
 
 os.environ.setdefault('SECRET_KEY', 'test-secret-key')
@@ -67,6 +68,25 @@ class ICloudHmeImportTestCase(unittest.TestCase):
         data = response.get_json()
         self.assertTrue(data["success"], msg=data)
         return data["source"]["id"]
+
+    def test_icloud_hme_ui_hooks_exist(self):
+        primary = Path("templates/partials/index/dialogs-primary.html").read_text(encoding="utf-8")
+        js_groups = Path("static/js/index/02-groups.js").read_text(encoding="utf-8")
+        js_settings = Path("static/js/index/07-settings.js").read_text(encoding="utf-8")
+
+        self.assertIn('value="icloud_hme"', primary)
+        self.assertIn("/api/icloud-hme/sources", js_settings)
+        self.assertIn("/api/icloud-hme/accounts/import", js_settings)
+        self.assertIn("iCloud HME", js_groups)
+        self.assertIn("loadIcloudHmeSources", js_settings)
+        self.assertIn("openIcloudHmeSourceModal", js_settings)
+        self.assertIn("saveIcloudHmeSource", js_settings)
+        self.assertIn("deleteIcloudHmeSource", js_settings)
+        self.assertIn("testIcloudHmeSourceImap", js_settings)
+        self.assertIn("syncIcloudHmeSource", js_settings)
+        self.assertIn("/api/icloud-hme/sources/test-imap", js_settings)
+        self.assertIn("/sync", js_settings)
+        self.assertIn("格式：HME地址 或 HME地址----备注，每行一个。接收 IMAP 配置在 iCloud HME 源中管理。", js_groups)
 
     def test_import_hme_addresses_binds_selected_source(self):
         source_id = self._create_source()

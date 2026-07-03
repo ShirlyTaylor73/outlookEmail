@@ -4,6 +4,7 @@
         let settingsScrollSyncBound = false;
         let settingsScrollSyncFrame = 0;
         let lastLoadedWebdavBackupSettings = null;
+        let icloudHmeSourcesCache = [];
         let lastNormalMailRetentionStatus = null;
         let normalMailRetentionStatusPollTimer = null;
         let normalMailRetentionStatusPollDelayMs = 0;
@@ -760,6 +761,262 @@
                 .filter(Number.isFinite);
         }
 
+        function getIcloudHmeSourceLabel(source) {
+            if (!source) return '未命名 HME 源';
+            const name = source.name || source.receiver_email || `Source #${source.id}`;
+            const receiver = source.receiver_email ? ` (${source.receiver_email})` : '';
+            return `${name}${receiver}`;
+        }
+
+        function renderIcloudHmeSourceOptions(select, selectedId = '') {
+            if (!select) return;
+            const currentValue = String(selectedId || select.value || '');
+            const options = ['<option value="">请选择 HME 源...</option>'];
+            icloudHmeSourcesCache.forEach(source => {
+                const value = String(source.id);
+                options.push(`<option value="${escapeHtml(value)}">${escapeHtml(getIcloudHmeSourceLabel(source))}</option>`);
+            });
+            select.innerHTML = options.join('');
+            if (currentValue && icloudHmeSourcesCache.some(source => String(source.id) === currentValue)) {
+                select.value = currentValue;
+            } else if (!currentValue && icloudHmeSourcesCache.length === 1) {
+                select.value = String(icloudHmeSourcesCache[0].id);
+            }
+        }
+
+        function renderIcloudHmeSourceList() {
+            const listEl = document.getElementById('icloudHmeSourceList');
+            if (!listEl) return;
+            if (!icloudHmeSourcesCache.length) {
+                listEl.innerHTML = '<div class="hme-source-empty">暂无 HME 源，请先新建。</div>';
+                return;
+            }
+            listEl.innerHTML = icloudHmeSourcesCache.map(source => `
+                <div class="hme-source-card">
+                    <div class="hme-source-card__main">
+                        <strong>${escapeHtml(source.name || '未命名 HME 源')}</strong>
+                        <span>${escapeHtml(source.receiver_email || '')}</span>
+                        <small>同步状态：${escapeHtml(source.last_sync_status || '未同步')}</small>
+                    </div>
+                    <div class="hme-source-card__actions">
+                        <button class="btn btn-sm btn-secondary" type="button" onclick="openIcloudHmeSourceModal(${Number(source.id)})">编辑</button>
+                        <button class="btn btn-sm btn-secondary" type="button" onclick="syncIcloudHmeSource(${Number(source.id)})">同步</button>
+                    </div>
+                </div>
+            `).join('');
+        }
+
+        async function loadIcloudHmeSources(selectedId = '') {
+            try {
+                const response = await fetch('/api/icloud-hme/sources', { cache: 'no-store' });
+                const data = await response.json();
+                if (!response.ok || !data.success) {
+                    throw new Error(data.error || '加载 iCloud HME 源失败');
+                }
+                icloudHmeSourcesCache = Array.isArray(data.sources) ? data.sources : [];
+                renderIcloudHmeSourceOptions(document.getElementById('importIcloudHmeSourceSelect'), selectedId);
+                renderIcloudHmeSourceOptions(document.getElementById('editIcloudHmeSourceSelect'), selectedId);
+                renderIcloudHmeSourceList();
+                return icloudHmeSourcesCache;
+            } catch (error) {
+                showToast(error.message || '加载 iCloud HME 源失败', 'error');
+                return [];
+            }
+        }
+
+        function resetIcloudHmeSourceForm() {
+            const defaults = {
+                icloudHmeSourceId: '',
+                icloudHmeSourceName: '',
+                icloudHmeSourceRegion: 'global',
+                icloudHmeReceiverEmail: '',
+                icloudHmeReceiverProvider: 'custom',
+                icloudHmeReceiverImapHost: '',
+                icloudHmeReceiverImapPort: '993',
+                icloudHmeReceiverImapPassword: '',
+                icloudHmeReceiverFolder: 'INBOX',
+                icloudHmeMaildomainHost: 'maildomain.icloud.com',
+                icloudHmeCookie: ''
+            };
+            Object.entries(defaults).forEach(([id, value]) => {
+                const el = document.getElementById(id);
+                if (el) el.value = value;
+            });
+            const useSsl = document.getElementById('icloudHmeUseSsl');
+            if (useSsl) useSsl.checked = true;
+            const title = document.getElementById('icloudHmeSourceModalTitle');
+            if (title) title.textContent = '新建 iCloud HME 源';
+            const deleteBtn = document.getElementById('icloudHmeSourceDeleteBtn');
+            const syncBtn = document.getElementById('icloudHmeSourceSyncBtn');
+            if (deleteBtn) deleteBtn.disabled = true;
+            if (syncBtn) syncBtn.disabled = true;
+        }
+
+        function fillIcloudHmeSourceForm(source) {
+            if (!source) {
+                resetIcloudHmeSourceForm();
+                return;
+            }
+            const values = {
+                icloudHmeSourceId: source.id || '',
+                icloudHmeSourceName: source.name || '',
+                icloudHmeSourceRegion: source.region || 'global',
+                icloudHmeReceiverEmail: source.receiver_email || '',
+                icloudHmeReceiverProvider: source.receiver_provider || 'custom',
+                icloudHmeReceiverImapHost: source.receiver_imap_host || '',
+                icloudHmeReceiverImapPort: source.receiver_imap_port || 993,
+                icloudHmeReceiverImapPassword: source.receiver_imap_password || '',
+                icloudHmeReceiverFolder: source.receiver_folder || 'INBOX',
+                icloudHmeMaildomainHost: source.maildomain_host || 'maildomain.icloud.com',
+                icloudHmeCookie: source.cookie || ''
+            };
+            Object.entries(values).forEach(([id, value]) => {
+                const el = document.getElementById(id);
+                if (el) el.value = value;
+            });
+            const useSsl = document.getElementById('icloudHmeUseSsl');
+            if (useSsl) useSsl.checked = source.use_ssl !== false;
+            const title = document.getElementById('icloudHmeSourceModalTitle');
+            if (title) title.textContent = '编辑 iCloud HME 源';
+            const deleteBtn = document.getElementById('icloudHmeSourceDeleteBtn');
+            const syncBtn = document.getElementById('icloudHmeSourceSyncBtn');
+            if (deleteBtn) deleteBtn.disabled = false;
+            if (syncBtn) syncBtn.disabled = false;
+        }
+
+        async function openIcloudHmeSourceModal(sourceId = null) {
+            showModal('icloudHmeSourceModal');
+            resetIcloudHmeSourceForm();
+            const sources = await loadIcloudHmeSources(sourceId || '');
+            if (!sourceId) return;
+            const cached = sources.find(source => String(source.id) === String(sourceId));
+            if (cached) {
+                fillIcloudHmeSourceForm(cached);
+            }
+            try {
+                const response = await fetch(`/api/icloud-hme/sources/${sourceId}`, { cache: 'no-store' });
+                const data = await response.json();
+                if (response.ok && data.success) {
+                    fillIcloudHmeSourceForm(data.source);
+                }
+            } catch (error) {
+                showToast('加载 iCloud HME 源详情失败', 'error');
+            }
+        }
+
+        function hideIcloudHmeSourceModal() {
+            hideModal('icloudHmeSourceModal');
+        }
+
+        function getIcloudHmeSourceFormPayload() {
+            const port = parseInt(document.getElementById('icloudHmeReceiverImapPort')?.value || '993', 10);
+            return {
+                name: document.getElementById('icloudHmeSourceName')?.value.trim() || '',
+                region: document.getElementById('icloudHmeSourceRegion')?.value || 'global',
+                receiver_email: document.getElementById('icloudHmeReceiverEmail')?.value.trim() || '',
+                receiver_provider: document.getElementById('icloudHmeReceiverProvider')?.value || 'custom',
+                receiver_imap_host: document.getElementById('icloudHmeReceiverImapHost')?.value.trim() || '',
+                receiver_imap_port: Number.isFinite(port) ? port : 993,
+                receiver_imap_password: document.getElementById('icloudHmeReceiverImapPassword')?.value || '',
+                receiver_folder: document.getElementById('icloudHmeReceiverFolder')?.value.trim() || 'INBOX',
+                use_ssl: !!document.getElementById('icloudHmeUseSsl')?.checked,
+                cookie: document.getElementById('icloudHmeCookie')?.value.trim() || '',
+                maildomain_host: document.getElementById('icloudHmeMaildomainHost')?.value.trim() || 'maildomain.icloud.com'
+            };
+        }
+
+        async function saveIcloudHmeSource() {
+            const sourceId = document.getElementById('icloudHmeSourceId')?.value || '';
+            const payload = getIcloudHmeSourceFormPayload();
+            if (!payload.name || !payload.receiver_email || !payload.receiver_imap_host || (!sourceId && !payload.receiver_imap_password)) {
+                showToast('源名称、接收邮箱、IMAP 服务器和 IMAP 密码不能为空', 'error');
+                return;
+            }
+            try {
+                const response = await fetch(sourceId ? `/api/icloud-hme/sources/${sourceId}` : '/api/icloud-hme/sources', {
+                    method: sourceId ? 'PUT' : 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+                const data = await response.json();
+                if (!response.ok || !data.success) {
+                    handleApiError(data, '保存 iCloud HME 源失败');
+                    return;
+                }
+                showToast(data.message || 'iCloud HME 源已保存', 'success');
+                fillIcloudHmeSourceForm(data.source);
+                await loadIcloudHmeSources(data.source?.id || sourceId);
+            } catch (error) {
+                showToast('保存 iCloud HME 源失败', 'error');
+            }
+        }
+
+        async function deleteIcloudHmeSource(sourceId = null) {
+            const id = sourceId || document.getElementById('icloudHmeSourceId')?.value;
+            if (!id) return;
+            if (!(await showConfirmModal('确定要删除这个 iCloud HME 源吗？已绑定账号的源不能删除。', { title: '删除 HME 源', confirmText: '确认删除' }))) {
+                return;
+            }
+            try {
+                const response = await fetch(`/api/icloud-hme/sources/${id}`, { method: 'DELETE' });
+                const data = await response.json();
+                if (!response.ok || !data.success) {
+                    handleApiError(data, '删除 iCloud HME 源失败');
+                    return;
+                }
+                showToast(data.message || 'iCloud HME 源已删除', 'success');
+                resetIcloudHmeSourceForm();
+                await loadIcloudHmeSources();
+            } catch (error) {
+                showToast('删除 iCloud HME 源失败', 'error');
+            }
+        }
+
+        async function testIcloudHmeSourceImap() {
+            const payload = getIcloudHmeSourceFormPayload();
+            try {
+                const response = await fetch('/api/icloud-hme/sources/test-imap', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+                const data = await response.json();
+                if (response.ok && data.success) {
+                    showToast('IMAP 连接测试成功', 'success');
+                    return;
+                }
+                handleApiError(data, 'IMAP 连接测试失败');
+            } catch (error) {
+                showToast('IMAP 连接测试失败', 'error');
+            }
+        }
+
+        async function syncIcloudHmeSource(sourceId = null) {
+            const id = sourceId || document.getElementById('icloudHmeSourceId')?.value;
+            if (!id) {
+                showToast('请先选择 HME 源', 'error');
+                return;
+            }
+            try {
+                const response = await fetch(`/api/icloud-hme/sources/${id}/sync`, { method: 'POST' });
+                const data = await response.json();
+                if (!response.ok || !data.success) {
+                    handleApiError(data, '同步 iCloud HME 源失败');
+                    return;
+                }
+                const imported = Number(data.imported_count || 0);
+                const updated = Number(data.updated_count || 0);
+                showToast(`同步完成：新增 ${imported} 个，更新 ${updated} 个`, 'success');
+                await loadIcloudHmeSources(id);
+                if (currentGroupId) {
+                    delete accountsCache[currentGroupId];
+                    await loadAccountsByGroup(currentGroupId, true);
+                }
+            } catch (error) {
+                showToast('同步 iCloud HME 源失败', 'error');
+            }
+        }
+
         function showAddAccountModal() {
             showModal('addAccountModal');
             document.getElementById('accountInput').value = '';
@@ -778,6 +1035,59 @@
             }
             resetImportDefaults();
             updateImportHint();
+            loadIcloudHmeSources();
+        }
+
+        async function submitAccountImport({
+            input,
+            groupId,
+            provider,
+            imapHost,
+            imapPort,
+            forwardEnabled,
+            remark,
+            status,
+            tagIds,
+            isTempGroup
+        }) {
+            if (isTempGroup) {
+                const tempProvider = document.getElementById('importChannelSelect').value || 'gptmail';
+                return fetch('/api/temp-emails/import', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ account_string: input, provider: tempProvider, group_id: groupId })
+                });
+            }
+            if (provider === 'icloud_hme') {
+                const sourceId = document.getElementById('importIcloudHmeSourceSelect')?.value || '';
+                return fetch('/api/icloud-hme/accounts/import', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        account_string: input,
+                        source_id: sourceId,
+                        group_id: groupId,
+                        remark,
+                        status,
+                        tag_ids: tagIds
+                    })
+                });
+            }
+            return fetch('/api/accounts', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    account_string: input,
+                    group_id: groupId,
+                    provider,
+                    imap_host: imapHost,
+                    imap_port: Number.isFinite(imapPort) ? imapPort : 993,
+                    forward_enabled: forwardEnabled,
+                    remark,
+                    status,
+                    tag_ids: tagIds
+                })
+            });
         }
 
         async function addAccount() {
@@ -802,41 +1112,34 @@
                 showToast('自定义 IMAP 必须填写服务器地址', 'error');
                 return;
             }
+            if (!isTempGroup && provider === 'icloud_hme' && !document.getElementById('importIcloudHmeSourceSelect')?.value) {
+                showToast('请选择 iCloud HME 源', 'error');
+                return;
+            }
 
             try {
                 if (importButton) {
                     importButton.disabled = true;
                     importButton.textContent = '导入中...';
                 }
-                let response;
-                if (isTempGroup) {
-                    const tempProvider = document.getElementById('importChannelSelect').value || 'gptmail';
-                    response = await fetch('/api/temp-emails/import', {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ account_string: input, provider: tempProvider, group_id: groupId })
-                    });
-                } else {
-                    response = await fetch('/api/accounts', {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({
-                            account_string: input,
-                            group_id: groupId,
-                            provider,
-                            imap_host: imapHost,
-                            imap_port: Number.isFinite(imapPort) ? imapPort : 993,
-                            forward_enabled: forwardEnabled,
-                            remark,
-                            status,
-                            tag_ids: tagIds
-                        })
-                    });
-                }
+                const response = await submitAccountImport({
+                    input,
+                    groupId,
+                    provider,
+                    imapHost,
+                    imapPort,
+                    forwardEnabled,
+                    remark,
+                    status,
+                    tagIds,
+                    isTempGroup
+                });
 
                 const data = await response.json();
                 if (data.success) {
-                    showToast(data.message, 'success');
+                    const imported = Number(data.imported_count || data.added_count || 0);
+                    const updated = Number(data.updated_count || 0);
+                    showToast(data.message || `导入完成：新增 ${imported} 个，更新 ${updated} 个`, 'success');
                     hideAddAccountModal();
                     delete accountsCache[groupId];
                     await loadGroups();
@@ -887,7 +1190,14 @@
                         document.getElementById('editForwardEnabled').checked = !!acc.forward_enabled;
                     }
                     if (document.getElementById('editProviderSelect')) {
-                        document.getElementById('editProviderSelect').value = acc.provider || (acc.account_type === 'imap' ? 'custom' : 'outlook');
+                        document.getElementById('editProviderSelect').value = acc.provider || (acc.account_type === 'icloud_hme' ? 'icloud_hme' : (acc.account_type === 'imap' ? 'custom' : 'outlook'));
+                    }
+                    if (acc.provider === 'icloud_hme' || acc.account_type === 'icloud_hme') {
+                        await loadIcloudHmeSources(acc.icloud_hme_source_id || '');
+                        const hmeSourceSelect = document.getElementById('editIcloudHmeSourceSelect');
+                        if (hmeSourceSelect && acc.icloud_hme_source_id) {
+                            hmeSourceSelect.value = String(acc.icloud_hme_source_id);
+                        }
                     }
                     updateEditAccountFields();
                     setModalVisible('editAccountModal', true);
@@ -903,6 +1213,7 @@
             const newGroupId = parseInt(document.getElementById('editGroupSelect').value);
             const provider = document.getElementById('editProviderSelect')?.value || 'outlook';
             const isOutlook = provider === 'outlook';
+            const isIcloudHme = provider === 'icloud_hme';
             const imapPort = parseInt(document.getElementById('editImapPort')?.value || '993', 10);
             const sortOrder = parseInt(document.getElementById('editSortOrder')?.value || '0', 10);
 
@@ -911,8 +1222,9 @@
                 password: document.getElementById('editPassword').value,
                 client_id: document.getElementById('editClientId').value.trim(),
                 refresh_token: document.getElementById('editRefreshToken').value.trim(),
-                account_type: isOutlook ? 'outlook' : 'imap',
+                account_type: isIcloudHme ? 'icloud_hme' : (isOutlook ? 'outlook' : 'imap'),
                 provider,
+                icloud_hme_source_id: document.getElementById('editIcloudHmeSourceSelect')?.value || '',
                 imap_host: document.getElementById('editImapHost')?.value.trim() || '',
                 imap_port: Number.isFinite(imapPort) ? imapPort : 993,
                 imap_password: document.getElementById('editImapPassword')?.value || '',
@@ -936,7 +1248,7 @@
                     return;
                 }
             } else {
-                if (!data.email || !data.imap_password) {
+                if (!data.email || (!isIcloudHme && !data.imap_password)) {
                     showToast('邮箱和 IMAP 密码不能为空', 'error');
                     return;
                 }
