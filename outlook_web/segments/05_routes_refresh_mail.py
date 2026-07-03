@@ -2864,6 +2864,288 @@ def fetch_oauth_imap_detail_response(account: Dict[str, Any], folder: str,
     )
 
 
+def hme_source_folder_for_request(source_config: Dict[str, Any], folder: str) -> str:
+    folder_name = normalize_folder_name(folder)
+    if folder_name == 'inbox':
+        return str(source_config.get('folder') or 'inbox').strip() or 'inbox'
+    return folder_name
+
+
+def build_hme_imap_error(code: str, message: str, error_type: str,
+                         status_code: int, details: Any = '') -> Dict[str, Any]:
+    return {
+        'success': False,
+        'error': build_error_payload(code, message, error_type, status_code, details),
+        'error_code': code,
+    }
+
+
+def fetch_icloud_hme_folder_emails(account: Dict[str, Any], folder: str,
+                                  skip: int, top: int) -> Dict[str, Any]:
+    folder_name = normalize_folder_name(folder)
+    mail = None
+    try:
+        source_config = get_icloud_hme_source_imap_config(account)
+        receiver_folder = hme_source_folder_for_request(source_config, folder_name)
+        skip = max(0, int(skip or 0))
+        top = max(1, int(top or 20))
+        mail = create_imap_connection(
+            source_config.get('imap_host', ''),
+            source_config.get('imap_port', 993),
+            source_config.get('proxy_url', '')
+        )
+        try:
+            mail.login(source_config.get('email_addr', ''), source_config.get('imap_password', ''))
+        except imaplib.IMAP4.error as exc:
+            return build_hme_imap_error(
+                'IMAP_AUTH_FAILED',
+                normalize_imap_auth_error(
+                    source_config.get('provider', 'custom'),
+                    source_config.get('imap_host', ''),
+                    str(exc)
+                ),
+                'IMAPAuthError',
+                401,
+            )
+
+        provider = source_config.get('provider', 'custom')
+        imap_host = source_config.get('imap_host', '')
+        imap_id_info = send_imap_id(mail, provider, imap_host)
+        selected, folder_diagnostics = resolve_imap_folder(mail, provider, receiver_folder, readonly=True)
+        if not selected:
+            if imap_id_info:
+                folder_diagnostics = {**folder_diagnostics, 'imap_id': imap_id_info}
+            blocked_error = get_imap_access_block_error(provider, receiver_folder, folder_diagnostics)
+            if blocked_error:
+                return {'success': False, 'error': blocked_error, 'error_code': 'IMAP_UNSAFE_LOGIN_BLOCKED'}
+            return build_hme_imap_error(
+                'IMAP_FOLDER_NOT_FOUND',
+                'IMAP 文件夹不存在或无权访问',
+                'IMAPFolderError',
+                400,
+                {'provider': provider, 'folder': receiver_folder, **folder_diagnostics}
+            )
+
+        selected_exists = 0
+        for attempt in reversed(folder_diagnostics.get('select_attempts') or []):
+            if str(attempt.get('status') or '') == 'OK':
+                selected_exists = extract_imap_exists_count(attempt.get('response'))
+                if selected_exists > 0:
+                    break
+
+        message_ids, search_mode, search_attempts = search_imap_message_ids(mail)
+        if message_ids is None:
+            return build_hme_imap_error(
+                'IMAP_SEARCH_FAILED',
+                'IMAP 搜索邮件失败',
+                'IMAPSearchError',
+                502,
+                {'attempts': search_attempts[:10]}
+            )
+        if not message_ids and selected_exists > 0:
+            message_ids = build_sequence_message_ids(selected_exists)
+            search_mode = 'sequence'
+        if not message_ids:
+            return {'success': True, 'emails': [], 'method': 'IMAP (HME)', 'has_more': False, 'request_method': 'imap'}
+
+        emails_data = []
+        for uid in reversed(message_ids):
+            try:
+                fetch_status, fetch_data, fetch_mode, _fetch_attempts = fetch_imap_message(
+                    mail, uid, '(FLAGS INTERNALDATE RFC822)', preferred_mode=search_mode or 'uid'
+                )
+                if fetch_status != 'OK' or not fetch_data:
+                    continue
+                raw_email, fetch_response_text = parse_imap_fetch_response(fetch_data)
+                if not raw_email:
+                    continue
+                msg = email.message_from_bytes(raw_email)
+                if not email_message_belongs_to_hme(msg, raw_email, account.get('email', '')):
+                    continue
+
+                item = parse_hme_email_message(account, folder_name, uid, raw_email)
+                item['id_mode'] = fetch_mode or search_mode or 'uid'
+                item['is_read'] = bool(re.search(r'\\Seen\b', fetch_response_text, flags=re.IGNORECASE))
+                item['date'] = extract_imap_internaldate(fetch_response_text) or item.get('date', '')
+                emails_data.append(item)
+            except Exception:
+                continue
+
+        emails_data.sort(key=lambda item: parse_email_datetime(item.get('date')) or datetime.min, reverse=True)
+        sliced = emails_data[skip:skip + top]
+        return {
+            'success': True,
+            'emails': sliced,
+            'method': 'IMAP (HME)',
+            'has_more': len(emails_data) > skip + len(sliced),
+            'request_method': 'imap',
+        }
+    except Exception as exc:
+        return build_hme_imap_error(
+            'IMAP_CONNECT_FAILED',
+            sanitize_error_details(str(exc)) or 'IMAP 连接失败',
+            'IMAPConnectError',
+            502,
+        )
+    finally:
+        if mail:
+            try:
+                mail.logout()
+            except Exception:
+                pass
+
+
+def fetch_icloud_hme_account_emails(account: Dict[str, Any], folder: str,
+                                    skip: int, top: int) -> Dict[str, Any]:
+    folder_name = normalize_folder_name(folder)
+    if folder_name not in VALID_MAIL_FOLDERS:
+        return {
+            'success': False,
+            'error': f'folder 参数无效，支持: {", ".join(sorted(VALID_MAIL_FOLDERS))}'
+        }
+    if folder_name == 'all':
+        merged_top = max(1, min(100, int(top or 20) * 2))
+        results = {
+            folder_job: fetch_icloud_hme_folder_emails(account, folder_job, skip, top)
+            for folder_job in ('inbox', 'junkemail')
+        }
+        return merge_folder_results(results, 0, merged_top)
+
+    result = fetch_icloud_hme_folder_emails(account, folder_name, skip, top)
+    if result.get('success'):
+        result['emails'] = format_email_items(result.get('emails', []), folder_name)
+    return result
+
+
+def fetch_icloud_hme_account_detail_response(account: Dict[str, Any], folder: str,
+                                             message_id: str, method: str,
+                                             id_mode: str, proxy_url: str = '') -> Dict[str, Any]:
+    if not message_id:
+        return {
+            'success': False,
+            'error': build_error_payload('EMAIL_DETAIL_INVALID', 'message_id 不能为空', 'ValidationError', 400, '')
+        }
+
+    folder_name = normalize_folder_name(folder)
+    mail = None
+    try:
+        source_config = get_icloud_hme_source_imap_config(account)
+        if proxy_url:
+            source_config['proxy_url'] = proxy_url
+        receiver_folder = hme_source_folder_for_request(source_config, folder_name)
+        mail = create_imap_connection(
+            source_config.get('imap_host', ''),
+            source_config.get('imap_port', 993),
+            source_config.get('proxy_url', '')
+        )
+        try:
+            mail.login(source_config.get('email_addr', ''), source_config.get('imap_password', ''))
+        except imaplib.IMAP4.error as exc:
+            return {
+                'success': False,
+                'error': build_error_payload(
+                    'IMAP_AUTH_FAILED',
+                    normalize_imap_auth_error(
+                        source_config.get('provider', 'custom'),
+                        source_config.get('imap_host', ''),
+                        str(exc)
+                    ),
+                    'IMAPAuthError',
+                    401,
+                    ''
+                )
+            }
+
+        provider = source_config.get('provider', 'custom')
+        selected, folder_diagnostics = resolve_imap_folder(mail, provider, receiver_folder, readonly=True)
+        if not selected:
+            blocked_error = get_imap_access_block_error(provider, receiver_folder, folder_diagnostics)
+            if blocked_error:
+                return {'success': False, 'error': blocked_error}
+            return {
+                'success': False,
+                'error': build_error_payload(
+                    'IMAP_FOLDER_NOT_FOUND',
+                    'IMAP 文件夹不存在或无权访问',
+                    'IMAPFolderError',
+                    400,
+                    {'provider': provider, 'folder': receiver_folder, **folder_diagnostics}
+                )
+            }
+
+        requested_mode = str(id_mode or '').strip().lower()
+        preferred_id_mode = requested_mode if requested_mode in {'uid', 'sequence'} else 'uid'
+        status, msg_data, fetch_mode, fetch_attempts = fetch_imap_message(
+            mail, str(message_id), '(RFC822)', preferred_mode=preferred_id_mode
+        )
+        if status != 'OK' or not msg_data:
+            return {
+                'success': False,
+                'error': build_error_payload(
+                    'EMAIL_DETAIL_FETCH_FAILED',
+                    '获取邮件详情失败',
+                    'IMAPFetchError',
+                    502,
+                    {
+                        'status': status,
+                        'provider': provider,
+                        'folder': selected,
+                        'message_id': str(message_id),
+                        'fetch_attempts': fetch_attempts[:10],
+                    }
+                )
+            }
+
+        raw_email, fetch_response_text = parse_imap_fetch_response(msg_data)
+        if not raw_email:
+            return {
+                'success': False,
+                'error': build_error_payload(
+                    'EMAIL_DETAIL_FETCH_FAILED',
+                    '获取邮件详情失败',
+                    'IMAPFetchError',
+                    502,
+                    {'provider': provider, 'folder': selected, 'message_id': str(message_id)}
+                )
+            }
+
+        msg = email.message_from_bytes(raw_email)
+        if not email_message_belongs_to_hme(msg, raw_email, account.get('email', '')):
+            return {
+                'success': False,
+                'error': build_error_payload(
+                    'EMAIL_DETAIL_FORBIDDEN',
+                    '邮件不属于当前 HME 地址',
+                    'PermissionError',
+                    403,
+                    {'message_id': str(message_id), 'hme_address': account.get('email', '')}
+                )
+            }
+
+        internal_date = extract_imap_internaldate(fetch_response_text)
+        email_detail = build_email_detail_from_message(msg, str(message_id), internal_date)
+        return build_retained_detail_success_response(
+            account, folder_name, message_id, email_detail, method or 'imap', 'imap', fetch_mode or id_mode or 'uid'
+        )
+    except Exception as exc:
+        return {
+            'success': False,
+            'error': build_error_payload(
+                'IMAP_CONNECT_FAILED',
+                sanitize_error_details(str(exc)) or 'IMAP 连接失败',
+                'IMAPConnectError',
+                502,
+                ''
+            )
+        }
+    finally:
+        if mail:
+            try:
+                mail.logout()
+            except Exception:
+                pass
+
+
 def parse_non_negative_int(raw_value: Any, default: int, max_value: Optional[int] = None) -> int:
     try:
         value = int(raw_value)
@@ -3036,7 +3318,7 @@ def retained_body_fetch_item(item: Dict[str, str], cache_row) -> Dict[str, str]:
 
 
 def retained_body_fetch_method(account: Dict[str, Any], item: Dict[str, str]) -> str:
-    if account.get('account_type') == 'imap':
+    if account.get('account_type') in {'imap', 'icloud_hme'}:
         return 'imap'
     id_mode = str(item.get('id_mode') or '').strip().lower()
     if id_mode == 'graph':
@@ -3053,6 +3335,8 @@ def fetch_retained_body_response(account: Dict[str, Any], item: Dict[str, str],
     message_id = item['id']
     folder = normalize_folder_name(item.get('folder', 'inbox'))
     id_mode = str(item.get('id_mode') or '').strip().lower()
+    if account.get('account_type') == 'icloud_hme':
+        return fetch_icloud_hme_account_detail_response(account, folder, message_id, method, id_mode, proxy_url)
     if account.get('account_type') == 'imap':
         return fetch_imap_account_detail_response(account, folder, message_id, method, id_mode, proxy_url)
     if method == 'graph':
@@ -3471,6 +3755,9 @@ def fetch_account_emails(account: Dict[str, Any], folder: str, skip: int, top: i
             'error': f'folder 参数无效，支持: {", ".join(sorted(VALID_MAIL_FOLDERS))}'
         }
 
+    if account.get('account_type') == 'icloud_hme':
+        return fetch_icloud_hme_account_emails(account, folder_name, skip, top)
+
     if folder_name == 'all':
         merged_top = max(1, min(100, top * 2))
         folder_jobs = ('inbox', 'junkemail')
@@ -3783,6 +4070,12 @@ def api_get_email_detail(email_addr, message_id):
 
     if account.get('account_type') == 'imap':
         result = fetch_imap_account_detail_response(
+            account, folder, message_id, method, id_mode, proxy_url
+        )
+        return jsonify(result)
+
+    if account.get('account_type') == 'icloud_hme':
+        result = fetch_icloud_hme_account_detail_response(
             account, folder, message_id, method, id_mode, proxy_url
         )
         return jsonify(result)

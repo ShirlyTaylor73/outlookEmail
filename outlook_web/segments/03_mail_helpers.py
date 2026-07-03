@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import secrets
 
+from email.utils import getaddresses
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 from outlook_web.mail_datetime import parse_mail_datetime
@@ -1166,6 +1167,105 @@ def build_email_detail_from_message(msg, message_id: str, date_value: str = '') 
         'body': body_html or body_text,
         'body_type': 'html' if body_html else 'text',
         'attachments': extract_message_attachments(msg),
+    }
+
+
+ICLOUD_HME_RECIPIENT_HEADERS = (
+    "To", "Delivered-To", "X-Original-To", "Envelope-To",
+    "Apparently-To", "Original-Recipient", "Resent-To", "Cc",
+)
+
+
+def normalize_hme_address(value) -> str:
+    return str(value or '').strip().strip('<>').lower()
+
+
+def extract_message_addresses(message, header_names) -> List[str]:
+    addresses: List[str] = []
+    seen = set()
+
+    for header_name in header_names or []:
+        for raw_value in message.get_all(header_name, []) or []:
+            decoded_value = decode_header_value(str(raw_value or ''))
+            candidates = [
+                parsed_addr
+                for _display_name, parsed_addr in getaddresses([decoded_value])
+                if parsed_addr
+            ]
+            candidates.extend(re.findall(r'[\w.!#$%&\'*+/=?^`{|}~-]+@[\w.-]+\.[A-Za-z]{2,}', decoded_value))
+            for candidate in candidates:
+                normalized = normalize_hme_address(candidate)
+                if not normalized or normalized in seen:
+                    continue
+                seen.add(normalized)
+                addresses.append(normalized)
+
+    return addresses
+
+
+def get_email_message_text_body(message) -> str:
+    body_text, body_html = extract_text_and_html(message)
+    return body_text or strip_html_content(body_html)
+
+
+def email_message_belongs_to_hme(message, raw_body, hme_address) -> bool:
+    normalized_hme = normalize_hme_address(hme_address)
+    if not normalized_hme:
+        return False
+
+    if normalized_hme in extract_message_addresses(message, ICLOUD_HME_RECIPIENT_HEADERS):
+        return True
+
+    body_text = get_email_message_text_body(message)
+    if not body_text and raw_body:
+        if isinstance(raw_body, (bytes, bytearray, memoryview)):
+            raw_bytes = bytes(raw_body)
+        else:
+            raw_bytes = str(raw_body).encode('utf-8', errors='ignore')
+        try:
+            body_text = raw_bytes.decode('utf-8', errors='ignore')
+        except Exception:
+            body_text = ''
+    return normalized_hme in str(body_text or '').lower()
+
+
+def parse_hme_email_message(account, folder, uid, raw_message) -> Dict:
+    msg = email.message_from_bytes(raw_message) if isinstance(raw_message, (bytes, bytearray, memoryview)) else raw_message
+    body_text = get_email_message_text_body(msg)
+    preview = body_text[:200] + ('...' if len(body_text) > 200 else '')
+    message_id = uid.decode('utf-8', errors='ignore') if isinstance(uid, (bytes, bytearray)) else str(uid)
+    return {
+        'id': message_id,
+        'subject': decode_header_value(msg.get('Subject', '无主题')),
+        'from': decode_header_value(msg.get('From', '未知')),
+        'to': decode_header_value(msg.get('To', '')),
+        'date': msg.get('Date', ''),
+        'id_mode': 'uid',
+        'method': 'imap',
+        'is_read': False,
+        'has_attachments': has_message_attachments(msg),
+        'body_preview': preview,
+        'folder': folder,
+    }
+
+
+def get_icloud_hme_source_imap_config(account) -> Dict:
+    source_id = (account or {}).get('icloud_hme_source_id')
+    if not source_id:
+        raise ValueError('HME 账号未绑定接收邮箱源')
+
+    source = get_icloud_hme_source_by_id(source_id, include_secret=True)
+    if not source:
+        raise ValueError('HME 接收邮箱源不存在')
+
+    return {
+        'email_addr': source.get('receiver_email') or '',
+        'imap_password': source.get('receiver_imap_password') or '',
+        'imap_host': source.get('receiver_imap_host') or '',
+        'imap_port': int(source.get('receiver_imap_port') or 993),
+        'provider': source.get('receiver_provider') or 'custom',
+        'folder': source.get('receiver_folder') or 'inbox',
+        'proxy_url': get_account_proxy_url(account or {}),
     }
 
 
