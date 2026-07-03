@@ -1133,6 +1133,25 @@ def init_db():
         )
     ''')
 
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS icloud_hme_source_mail_sync_state (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            source_id INTEGER NOT NULL,
+            folder TEXT NOT NULL DEFAULT 'inbox',
+            last_synced_at TIMESTAMP,
+            last_seen_uid TEXT DEFAULT '',
+            last_seen_sequence INTEGER DEFAULT 0,
+            last_selected_exists INTEGER DEFAULT 0,
+            last_scanned_count INTEGER DEFAULT 0,
+            last_matched_count INTEGER DEFAULT 0,
+            partial INTEGER NOT NULL DEFAULT 0,
+            last_error TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (source_id) REFERENCES icloud_hme_sources (id) ON DELETE CASCADE
+        )
+    ''')
+
     # 创建临时邮箱表
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS temp_emails (
@@ -1976,6 +1995,49 @@ def init_db():
     cursor.execute('''
         CREATE INDEX IF NOT EXISTS idx_icloud_hme_source_message_recipients_lookup
         ON icloud_hme_source_message_recipients(source_id, hme_address, source_message_id)
+    ''')
+
+    cursor.execute('''
+        CREATE UNIQUE INDEX IF NOT EXISTS ux_icloud_hme_source_mail_sync_state
+        ON icloud_hme_source_mail_sync_state(source_id, folder)
+    ''')
+
+    cursor.execute('''
+        CREATE INDEX IF NOT EXISTS idx_icloud_hme_source_mail_sync_state_recent
+        ON icloud_hme_source_mail_sync_state(source_id, folder, last_synced_at)
+    ''')
+
+    cursor.execute('''
+        INSERT OR IGNORE INTO icloud_hme_source_mail_sync_state (
+            source_id, folder, last_synced_at, last_seen_uid, last_seen_sequence,
+            last_selected_exists, last_scanned_count, last_matched_count, partial, last_error
+        )
+        SELECT
+            source_id,
+            folder,
+            MAX(COALESCE(last_synced_at, updated_at, created_at)),
+            CAST(MAX(CASE
+                WHEN id_mode = 'uid' AND provider_message_id GLOB '[0-9]*'
+                THEN CAST(provider_message_id AS INTEGER)
+                ELSE 0
+            END) AS TEXT),
+            MAX(CASE
+                WHEN id_mode = 'sequence' AND provider_message_id GLOB '[0-9]*'
+                THEN CAST(provider_message_id AS INTEGER)
+                ELSE 0
+            END),
+            MAX(CASE
+                WHEN id_mode = 'sequence' AND provider_message_id GLOB '[0-9]*'
+                THEN CAST(provider_message_id AS INTEGER)
+                ELSE 0
+            END),
+            0,
+            COUNT(*),
+            0,
+            NULL
+        FROM icloud_hme_source_messages
+        WHERE list_cached = 1
+        GROUP BY source_id, folder
     ''')
 
     cursor.execute('''

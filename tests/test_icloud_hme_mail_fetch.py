@@ -36,6 +36,8 @@ class FakeHmeMail:
         self.messages = {str(uid): raw for uid, raw in messages.items()}
         self.login_calls = []
         self.select_calls = []
+        self.search_calls = []
+        self.fetched_uids = []
         self.logged_out = False
 
     def login(self, email_addr, password):
@@ -54,10 +56,21 @@ class FakeHmeMail:
 
     def uid(self, command, *args):
         if command == 'SEARCH':
-            ids = ' '.join(self.messages.keys()).encode('ascii')
+            self.search_calls.append(args)
+            ids = list(self.messages.keys())
+            if len(args) >= 3 and str(args[1]).upper() == 'UID':
+                range_text = args[2].decode('ascii') if isinstance(args[2], bytes) else str(args[2])
+                start_text = range_text.split(':', 1)[0]
+                try:
+                    start_uid = int(start_text)
+                    ids = [uid for uid in ids if int(uid) >= start_uid]
+                except (TypeError, ValueError):
+                    pass
+            ids = ' '.join(ids).encode('ascii')
             return 'OK', [ids]
         if command == 'FETCH':
             uid = args[0].decode('ascii') if isinstance(args[0], bytes) else str(args[0])
+            self.fetched_uids.append(uid)
             raw = self.messages.get(uid)
             if raw is None:
                 return 'NO', [b'not found']
@@ -83,12 +96,9 @@ class SlowFetchHmeMail(FakeHmeMail):
     def __init__(self, messages, *, fetch_delay=0.0):
         super().__init__(messages)
         self.fetch_delay = fetch_delay
-        self.fetched_uids = []
 
     def uid(self, command, *args):
         if command == 'FETCH':
-            uid = args[0].decode('ascii') if isinstance(args[0], bytes) else str(args[0])
-            self.fetched_uids.append(uid)
             if self.fetch_delay:
                 time.sleep(self.fetch_delay)
         return super().uid(command, *args)
@@ -388,6 +398,146 @@ class IcloudHmeMailFetchTests(unittest.TestCase):
         self.assertEqual([item['subject'] for item in other_result['emails']], ['Other message'])
         self.assertEqual(len(fake_mail.login_calls), 1)
 
+    def test_hme_empty_account_uses_synced_source_cache_without_imap_refetch(self):
+        with HmeSourceCacheContext(self.app) as ctx:
+            abc_account = ctx.create_hme_account('abc@icloud.com')
+            empty_account = ctx.create_hme_account('empty@icloud.com')
+            fake_mail = FakeHmeMail({
+                '101': make_raw_message(
+                    'ABC message',
+                    extra_headers={'Delivered-To': 'abc@icloud.com'},
+                ),
+            })
+
+            with patch.object(web_outlook_app, 'create_imap_connection', return_value=fake_mail):
+                abc_result = web_outlook_app.fetch_account_emails(abc_account, 'inbox', 0, 20)
+
+            blocked_imap = Mock(side_effect=AssertionError('empty HME should trust source sync state'))
+            with patch.object(
+                web_outlook_app,
+                'create_imap_connection',
+                blocked_imap,
+            ):
+                empty_result = web_outlook_app.fetch_account_emails(empty_account, 'inbox', 0, 20)
+
+        self.assertTrue(abc_result['success'], msg=abc_result)
+        self.assertTrue(empty_result['success'], msg=empty_result)
+        self.assertEqual(empty_result['emails'], [])
+        self.assertEqual(len(fake_mail.login_calls), 1)
+        blocked_imap.assert_not_called()
+
+    def test_hme_empty_source_sync_writes_state_and_skips_next_imap(self):
+        with HmeSourceCacheContext(self.app) as ctx:
+            empty_account = ctx.create_hme_account('empty@icloud.com')
+            fake_mail = FakeHmeMail({
+                '101': make_raw_message(
+                    'Unrelated message',
+                    extra_headers={'Delivered-To': 'other@icloud.com'},
+                ),
+            })
+
+            with patch.object(web_outlook_app, 'create_imap_connection', return_value=fake_mail):
+                first_result = web_outlook_app.fetch_account_emails(empty_account, 'inbox', 0, 20)
+
+            state_row = web_outlook_app.get_db().execute(
+                '''
+                SELECT last_seen_uid, last_selected_exists, last_scanned_count, last_matched_count
+                FROM icloud_hme_source_mail_sync_state
+                WHERE source_id = ? AND folder = 'inbox'
+                ''',
+                (ctx.source_id,),
+            ).fetchone()
+
+            blocked_imap = Mock(side_effect=AssertionError('synced empty source should not refetch IMAP'))
+            with patch.object(
+                web_outlook_app,
+                'create_imap_connection',
+                blocked_imap,
+            ):
+                second_result = web_outlook_app.fetch_account_emails(empty_account, 'inbox', 0, 20)
+
+        self.assertTrue(first_result['success'], msg=first_result)
+        self.assertEqual(first_result['emails'], [])
+        self.assertIsNotNone(state_row)
+        self.assertEqual(state_row['last_seen_uid'], '101')
+        self.assertEqual(state_row['last_selected_exists'], 1)
+        self.assertEqual(state_row['last_scanned_count'], 1)
+        self.assertEqual(state_row['last_matched_count'], 0)
+        self.assertTrue(second_result['success'], msg=second_result)
+        self.assertEqual(second_result['emails'], [])
+        self.assertEqual(len(fake_mail.login_calls), 1)
+        blocked_imap.assert_not_called()
+
+    def test_hme_force_refresh_fetches_only_new_uid_after_watermark(self):
+        with HmeSourceCacheContext(self.app) as ctx:
+            abc_account = ctx.create_hme_account('abc@icloud.com')
+            new_account = ctx.create_hme_account('new@icloud.com')
+            baseline_mail = FakeHmeMail({
+                '101': make_raw_message(
+                    'ABC message',
+                    extra_headers={'Delivered-To': 'abc@icloud.com'},
+                ),
+            })
+
+            with patch.object(web_outlook_app, 'create_imap_connection', return_value=baseline_mail):
+                baseline_result = web_outlook_app.fetch_account_emails(abc_account, 'inbox', 0, 20)
+
+            refresh_mail = FakeHmeMail({
+                '101': make_raw_message(
+                    'Old ABC message',
+                    extra_headers={'Delivered-To': 'abc@icloud.com'},
+                ),
+                '102': make_raw_message(
+                    'New HME message',
+                    extra_headers={'Delivered-To': 'new@icloud.com'},
+                ),
+            })
+            with patch.object(web_outlook_app, 'create_imap_connection', return_value=refresh_mail):
+                refreshed_result = web_outlook_app.fetch_account_emails(
+                    new_account, 'inbox', 0, 20, force_refresh=True
+                )
+
+        self.assertTrue(baseline_result['success'], msg=baseline_result)
+        self.assertTrue(refreshed_result['success'], msg=refreshed_result)
+        self.assertEqual([item['subject'] for item in refreshed_result['emails']], ['New HME message'])
+        self.assertEqual(refresh_mail.fetched_uids, ['102'])
+
+    def test_hme_source_sync_state_is_backfilled_from_cached_messages(self):
+        with HmeSourceCacheContext(self.app) as ctx:
+            account = ctx.create_hme_account('abc@icloud.com')
+            fake_mail = FakeHmeMail({
+                '101': make_raw_message(
+                    'Cached before migration',
+                    extra_headers={'Delivered-To': 'abc@icloud.com'},
+                ),
+            })
+
+            with patch.object(web_outlook_app, 'create_imap_connection', return_value=fake_mail):
+                result = web_outlook_app.fetch_account_emails(account, 'inbox', 0, 20)
+
+            db = web_outlook_app.get_db()
+            db.execute(
+                'DELETE FROM icloud_hme_source_mail_sync_state WHERE source_id = ?',
+                (ctx.source_id,),
+            )
+            db.commit()
+
+            web_outlook_app.init_db()
+            state_row = db.execute(
+                '''
+                SELECT last_seen_uid, last_matched_count, partial
+                FROM icloud_hme_source_mail_sync_state
+                WHERE source_id = ? AND folder = 'inbox'
+                ''',
+                (ctx.source_id,),
+            ).fetchone()
+
+        self.assertTrue(result['success'], msg=result)
+        self.assertIsNotNone(state_row)
+        self.assertEqual(state_row['last_seen_uid'], '101')
+        self.assertEqual(state_row['last_matched_count'], 1)
+        self.assertEqual(state_row['partial'], 0)
+
     def test_hme_cached_detail_is_returned_without_imap_refetch(self):
         with HmeSourceCacheContext(self.app) as ctx:
             account = ctx.create_hme_account('abc@icloud.com')
@@ -473,6 +623,7 @@ class HmeSourceCacheContext:
         for table in (
             'icloud_hme_source_message_recipients',
             'icloud_hme_source_messages',
+            'icloud_hme_source_mail_sync_state',
             'accounts',
             'icloud_hme_sources',
         ):
