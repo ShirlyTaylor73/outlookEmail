@@ -3134,30 +3134,118 @@ def count_icloud_hme_source_cached_messages(source_id: int, folders: List[str], 
     return int(row['count'] if row else 0)
 
 
+def parse_hme_positive_int(value: Any) -> int:
+    try:
+        parsed = int(str(value or '').strip())
+    except (TypeError, ValueError):
+        return 0
+    return parsed if parsed > 0 else 0
+
+
+def normalize_hme_source_sync_folders(folders: List[str]) -> List[str]:
+    normalized = [normalize_folder_name(folder) for folder in (folders or ['inbox'])]
+    normalized = [folder for folder in normalized if folder in VALID_MAIL_FOLDERS and folder != 'all']
+    return normalized or ['inbox']
+
+
+def get_icloud_hme_source_mail_sync_state(source_id: int, folder: str, db=None):
+    if not source_id:
+        return None
+    database = db or get_db()
+    return database.execute(
+        '''
+        SELECT source_id, folder, last_synced_at, last_seen_uid, last_seen_sequence,
+               last_selected_exists, last_scanned_count, last_matched_count,
+               partial, last_error
+        FROM icloud_hme_source_mail_sync_state
+        WHERE source_id = ? AND folder = ?
+        ''',
+        (int(source_id), normalize_folder_name(folder))
+    ).fetchone()
+
+
+def has_icloud_hme_source_mail_sync_state(source_id: int, folders: List[str], db=None) -> bool:
+    normalized_folders = normalize_hme_source_sync_folders(folders)
+    database = db or get_db()
+    for folder in normalized_folders:
+        row = get_icloud_hme_source_mail_sync_state(source_id, folder, db=database)
+        if not row or int(row['partial'] or 0):
+            return False
+    return True
+
+
+def upsert_icloud_hme_source_mail_sync_state(source_id: int, folder: str,
+                                             *, last_seen_uid: Any = '',
+                                             last_seen_sequence: int = 0,
+                                             last_selected_exists: int = 0,
+                                             last_scanned_count: int = 0,
+                                             last_matched_count: int = 0,
+                                             partial: bool = False,
+                                             last_error: str = '',
+                                             db=None) -> None:
+    if not source_id:
+        return
+    database = db or get_db()
+    database.execute(
+        '''
+        INSERT INTO icloud_hme_source_mail_sync_state (
+            source_id, folder, last_synced_at, last_seen_uid, last_seen_sequence,
+            last_selected_exists, last_scanned_count, last_matched_count,
+            partial, last_error, updated_at
+        )
+        VALUES (?, ?, CURRENT_TIMESTAMP, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+        ON CONFLICT(source_id, folder)
+        DO UPDATE SET
+            last_synced_at = CURRENT_TIMESTAMP,
+            last_seen_uid = excluded.last_seen_uid,
+            last_seen_sequence = excluded.last_seen_sequence,
+            last_selected_exists = excluded.last_selected_exists,
+            last_scanned_count = excluded.last_scanned_count,
+            last_matched_count = excluded.last_matched_count,
+            partial = excluded.partial,
+            last_error = excluded.last_error,
+            updated_at = CURRENT_TIMESTAMP
+        ''',
+        (
+            int(source_id),
+            normalize_folder_name(folder),
+            str(last_seen_uid or ''),
+            int(last_seen_sequence or 0),
+            int(last_selected_exists or 0),
+            int(last_scanned_count or 0),
+            int(last_matched_count or 0),
+            1 if partial else 0,
+            last_error or None,
+        )
+    )
+    database.commit()
+
+
 def is_icloud_hme_source_cache_recent(source_id: int, folders: List[str],
                                       max_age_seconds: int = HME_SOURCE_BACKGROUND_SYNC_RECENT_SECONDS) -> bool:
     if not source_id:
         return False
-    normalized_folders = [normalize_folder_name(folder) for folder in folders or []]
-    params: List[Any] = [source_id]
-    folder_filter = ''
-    if normalized_folders and 'all' not in normalized_folders:
-        placeholders = ','.join('?' for _ in normalized_folders)
-        folder_filter = f'AND folder IN ({placeholders})'
-        params.extend(normalized_folders)
+    normalized_folders = normalize_hme_source_sync_folders(folders)
+    placeholders = ','.join('?' for _ in normalized_folders)
     row = get_db().execute(
         f'''
-        SELECT CASE
-            WHEN MAX(last_synced_at) IS NULL THEN 0
-            WHEN (julianday('now') - julianday(MAX(last_synced_at))) * 86400 <= ? THEN 1
-            ELSE 0
-        END AS recent
-        FROM icloud_hme_source_messages
-        WHERE source_id = ? AND list_cached = 1 {folder_filter}
+        SELECT COUNT(*) AS state_count,
+               MIN(CASE
+                   WHEN last_synced_at IS NOT NULL
+                    AND partial = 0
+                    AND (julianday('now') - julianday(last_synced_at)) * 86400 <= ?
+                   THEN 1 ELSE 0
+               END) AS all_recent
+        FROM icloud_hme_source_mail_sync_state
+        WHERE source_id = ? AND folder IN ({placeholders})
         ''',
-        [max_age_seconds, *params]
+        [max_age_seconds, source_id, *normalized_folders]
     ).fetchone()
-    return bool(row and int(row['recent'] or 0))
+    return bool(
+        row
+        and int(row['state_count'] or 0) == len(normalized_folders)
+        and int(row['all_recent'] or 0) == 1
+    )
 
 
 def fetch_cached_icloud_hme_source_messages(account: Dict[str, Any], folder: str,
@@ -3267,15 +3355,55 @@ def fetch_cached_icloud_hme_source_detail(account: Dict[str, Any], folder: str,
     return icloud_hme_source_row_to_detail_response(row)
 
 
+def search_imap_message_ids_after_uid(mail, last_seen_uid: Any):
+    start_uid = parse_hme_positive_int(last_seen_uid) + 1
+    if start_uid <= 1:
+        return search_imap_message_ids(mail)
+
+    attempts: List[Dict[str, Any]] = []
+    try:
+        status, data = mail.uid('SEARCH', None, 'UID', f'{start_uid}:*')
+        attempts.append({
+            'mode': 'uid',
+            'status': str(status),
+            'response': sanitize_error_details(str(data or ''))[:200],
+            'range': f'{start_uid}:*',
+        })
+        if status == 'OK':
+            payload = data[0] if data else b''
+            return payload.split() if payload else [], 'uid', attempts
+    except Exception as exc:
+        attempts.append({
+            'mode': 'uid',
+            'status': type(exc).__name__,
+            'response': sanitize_error_details(str(exc))[:200],
+            'range': f'{start_uid}:*',
+        })
+
+    return None, '', attempts
+
+
+def hme_source_sequence_message_ids_after(last_selected_exists: Any, selected_exists: int) -> List[bytes]:
+    start_sequence = parse_hme_positive_int(last_selected_exists) + 1
+    if selected_exists < start_sequence:
+        return []
+    return [str(index).encode('utf-8') for index in range(start_sequence, selected_exists + 1)]
+
+
+def hme_max_numeric_id(ids: List[Any]) -> int:
+    max_id = 0
+    for item in ids or []:
+        text = item.decode('utf-8', errors='ignore') if isinstance(item, (bytes, bytearray)) else str(item)
+        max_id = max(max_id, parse_hme_positive_int(text))
+    return max_id
+
+
 def sync_icloud_hme_source_messages(source_id: int, folders: List[str],
                                     force: bool = False, proxy_url: str = '') -> Dict[str, Any]:
     source_id = int(source_id or 0)
     if not source_id:
         return {'success': False, 'error': 'HME source_id 不能为空'}
-    normalized_folders = [normalize_folder_name(folder) for folder in (folders or ['inbox'])]
-    normalized_folders = [folder for folder in normalized_folders if folder in VALID_MAIL_FOLDERS and folder != 'all']
-    if not normalized_folders:
-        normalized_folders = ['inbox']
+    normalized_folders = normalize_hme_source_sync_folders(folders)
 
     lock = get_hme_source_sync_lock(source_id)
     acquired = lock.acquire(blocking=bool(force))
@@ -3308,12 +3436,37 @@ def sync_icloud_hme_source_messages(source_id: int, folders: List[str],
         scan_timeout_seconds = get_hme_folder_scan_timeout_seconds()
 
         for folder_name in normalized_folders:
+            folder_scanned_count = 0
+            folder_matched_count = 0
+            folder_partial = False
+            folder_error = ''
+            previous_state = get_icloud_hme_source_mail_sync_state(source_id, folder_name, db=db)
+            previous_last_seen_uid = previous_state['last_seen_uid'] if previous_state else ''
+            previous_last_seen_sequence = int(previous_state['last_seen_sequence'] or 0) if previous_state else 0
+            previous_last_selected_exists = int(previous_state['last_selected_exists'] or 0) if previous_state else 0
+            next_last_seen_uid = previous_last_seen_uid
+            next_last_seen_sequence = previous_last_seen_sequence
+            next_last_selected_exists = previous_last_selected_exists
             if time.monotonic() - started_at >= scan_timeout_seconds:
                 partial = True
+                folder_partial = True
                 break
             receiver_folder = hme_source_folder_for_request(source_config, folder_name)
             selected, folder_diagnostics = resolve_imap_folder(mail, provider, receiver_folder, readonly=True)
             if not selected:
+                folder_error = 'IMAP folder select failed'
+                upsert_icloud_hme_source_mail_sync_state(
+                    source_id,
+                    folder_name,
+                    last_seen_uid=previous_last_seen_uid,
+                    last_seen_sequence=previous_last_seen_sequence,
+                    last_selected_exists=previous_last_selected_exists,
+                    last_scanned_count=0,
+                    last_matched_count=0,
+                    partial=True,
+                    last_error=folder_error,
+                    db=db,
+                )
                 continue
 
             selected_exists = 0
@@ -3322,19 +3475,57 @@ def sync_icloud_hme_source_messages(source_id: int, folders: List[str],
                     selected_exists = extract_imap_exists_count(attempt.get('response'))
                     if selected_exists > 0:
                         break
+            next_last_selected_exists = max(previous_last_selected_exists, selected_exists)
 
-            message_ids, search_mode, _search_attempts = search_imap_message_ids(mail)
+            if previous_state and parse_hme_positive_int(previous_last_seen_uid):
+                message_ids, search_mode, _search_attempts = search_imap_message_ids_after_uid(mail, previous_last_seen_uid)
+                if message_ids is None:
+                    message_ids = hme_source_sequence_message_ids_after(previous_last_selected_exists, selected_exists)
+                    search_mode = 'sequence'
+            elif previous_state:
+                message_ids = hme_source_sequence_message_ids_after(previous_last_selected_exists, selected_exists)
+                search_mode = 'sequence'
+            else:
+                message_ids, search_mode, _search_attempts = search_imap_message_ids(mail)
             if message_ids is None:
+                folder_error = 'IMAP search failed'
+                upsert_icloud_hme_source_mail_sync_state(
+                    source_id,
+                    folder_name,
+                    last_seen_uid=previous_last_seen_uid,
+                    last_seen_sequence=previous_last_seen_sequence,
+                    last_selected_exists=next_last_selected_exists,
+                    last_scanned_count=0,
+                    last_matched_count=0,
+                    partial=True,
+                    last_error=folder_error,
+                    db=db,
+                )
                 continue
             if not message_ids and selected_exists > 0:
-                message_ids = build_sequence_message_ids(selected_exists)
-                search_mode = 'sequence'
+                if previous_state:
+                    message_ids = hme_source_sequence_message_ids_after(previous_last_selected_exists, selected_exists)
+                    search_mode = 'sequence'
+                else:
+                    message_ids = build_sequence_message_ids(selected_exists)
+                    search_mode = 'sequence'
+
+            if search_mode == 'uid':
+                max_uid = hme_max_numeric_id(message_ids)
+                if max_uid:
+                    next_last_seen_uid = str(max(parse_hme_positive_int(previous_last_seen_uid), max_uid))
+            elif search_mode == 'sequence':
+                max_sequence = hme_max_numeric_id(message_ids)
+                if max_sequence:
+                    next_last_seen_sequence = max(previous_last_seen_sequence, max_sequence)
 
             for uid in reversed(message_ids or []):
                 if time.monotonic() - started_at >= scan_timeout_seconds:
                     partial = True
+                    folder_partial = True
                     break
                 scanned_count += 1
+                folder_scanned_count += 1
                 fetch_status, fetch_data, fetch_mode, _fetch_attempts = fetch_imap_message(
                     mail, uid, '(FLAGS INTERNALDATE RFC822)', preferred_mode=search_mode or 'uid'
                 )
@@ -3348,6 +3539,7 @@ def sync_icloud_hme_source_messages(source_id: int, folders: List[str],
                 if not recipients:
                     continue
                 matched_count += 1
+                folder_matched_count += 1
                 row = build_icloud_hme_source_message_row(
                     source_id,
                     folder_name,
@@ -3358,6 +3550,19 @@ def sync_icloud_hme_source_messages(source_id: int, folders: List[str],
                 )
                 if upsert_icloud_hme_source_message(row, recipients, db=db):
                     synced_count += 1
+
+            upsert_icloud_hme_source_mail_sync_state(
+                source_id,
+                folder_name,
+                last_seen_uid=previous_last_seen_uid if folder_partial else next_last_seen_uid,
+                last_seen_sequence=previous_last_seen_sequence if folder_partial else next_last_seen_sequence,
+                last_selected_exists=previous_last_selected_exists if folder_partial else next_last_selected_exists,
+                last_scanned_count=folder_scanned_count,
+                last_matched_count=folder_matched_count,
+                partial=folder_partial,
+                last_error=folder_error,
+                db=db,
+            )
 
         return {
             'success': True,
@@ -3800,22 +4005,21 @@ def fetch_icloud_hme_account_emails(account: Dict[str, Any], folder: str,
     source_folders = hme_source_folders_for_request(folder_name)
     proxy_url = get_account_proxy_url(account)
     try:
-        source_cache_count = count_icloud_hme_source_cached_messages(source_id, source_folders)
+        source_sync_ready = has_icloud_hme_source_mail_sync_state(source_id, source_folders)
     except RuntimeError as exc:
         if 'application context' in str(exc):
             return fetch_icloud_hme_account_emails_legacy(account, folder_name, skip, top)
         raise
     cached_result = fetch_cached_icloud_hme_source_messages(account, folder_name, skip, top)
-    cached_count = int(cached_result.get('count') or 0) if cached_result.get('success') else 0
 
-    if force_refresh or source_cache_count == 0 or cached_count == 0:
+    if force_refresh or not source_sync_ready:
         sync_result = sync_icloud_hme_source_messages(
             source_id,
             source_folders,
             force=True,
             proxy_url=proxy_url,
         )
-        if not sync_result.get('success') and source_cache_count == 0:
+        if not sync_result.get('success') and not source_sync_ready:
             return sync_result
     else:
         start_icloud_hme_source_background_sync(source_id, source_folders, proxy_url=proxy_url)
