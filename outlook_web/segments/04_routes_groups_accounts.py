@@ -286,6 +286,63 @@ def api_delete_icloud_hme_source(source_id):
     return jsonify({'success': True, 'message': 'iCloud HME 接收源已删除'})
 
 
+def resolve_icloud_hme_import_source_id(raw_source_id):
+    if raw_source_id not in (None, ''):
+        try:
+            source_id = int(raw_source_id)
+        except (TypeError, ValueError):
+            raise ValueError('source_id 必须为整数')
+        if not get_icloud_hme_source_by_id(source_id):
+            raise ValueError('iCloud HME 接收源不存在')
+        return source_id
+
+    sources = list_icloud_hme_sources()
+    if len(sources) == 1:
+        return int(sources[0]['id'])
+    if not sources:
+        raise ValueError('请先创建 iCloud HME 接收源')
+    raise ValueError('存在多个 iCloud HME 接收源，请选择 source_id')
+
+
+@app.route('/api/icloud-hme/accounts/import', methods=['POST'])
+@login_required
+def api_import_icloud_hme_accounts():
+    data = request.get_json(silent=True) or {}
+    account_string = str(data.get('account_string') or '')
+    if not account_string.strip():
+        return jsonify({'success': False, 'error': '请输入 HME 地址'}), 400
+
+    group_id = data.get('group_id', 1)
+    group_error = validate_account_target_group_id(group_id)
+    if group_error:
+        return jsonify({'success': False, 'error': group_error}), 400
+
+    try:
+        source_id = resolve_icloud_hme_import_source_id(data.get('source_id'))
+        result = import_icloud_hme_accounts(
+            account_string,
+            source_id,
+            group_id,
+            remark=str(data.get('remark') or '').strip(),
+            status=data.get('status', 'active'),
+            tags=data.get('tags', data.get('tag_ids')),
+        )
+    except ValueError as exc:
+        return jsonify({'success': False, 'error': str(exc)}), 400
+    except Exception:
+        return jsonify({'success': False, 'error': '导入 iCloud HME 账号失败'}), 500
+
+    return jsonify({
+        'success': True,
+        'source_id': source_id,
+        'imported_count': result.get('imported_count', 0),
+        'updated_count': result.get('updated_count', 0),
+        'conflicts': result.get('conflicts', []),
+        'errors': result.get('errors', []),
+        'imported_accounts': result.get('imported_accounts', []),
+    })
+
+
 def serialize_imap_folder_listing(folder_rows) -> List[str]:
     folders = []
     for row in folder_rows or []:
@@ -983,7 +1040,7 @@ def generate_mailbox_claim_token() -> str:
 
 def serialize_claimed_mailbox(resource_type: str, row, claim_token: str,
                               lease_expires_at: str) -> Dict[str, Any]:
-    return {
+    payload = {
         'resource_type': resource_type,
         'resource_id': int(row['id']),
         'email': row['email'],
@@ -991,6 +1048,10 @@ def serialize_claimed_mailbox(resource_type: str, row, claim_token: str,
         'claim_token': claim_token,
         'lease_expires_at': lease_expires_at,
     }
+    if resource_type == MAILBOX_TYPE_ACCOUNT and row['account_type'] == 'icloud_hme':
+        payload['account_type'] = row['account_type']
+        payload['provider'] = row['provider']
+    return payload
 
 
 def expire_stale_mailbox_claims(db, now_str: str) -> int:
@@ -1085,7 +1146,8 @@ def claim_external_mailbox(source_group_id, caller_id: str, task_id: str,
         else:
             row = db.execute(
                 '''
-                SELECT id, email, status, provider, account_type, group_id, created_at, updated_at
+                SELECT id, email, status, provider, account_type, icloud_hme_source_id,
+                       group_id, created_at, updated_at
                 FROM accounts
                 WHERE group_id = ?
                   AND status = 'active'

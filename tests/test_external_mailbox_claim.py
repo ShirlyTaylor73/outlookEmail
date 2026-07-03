@@ -35,6 +35,7 @@ class ExternalMailboxClaimTests(unittest.TestCase):
                 'account_aliases',
                 'account_refresh_logs',
                 'accounts',
+                'icloud_hme_sources',
                 'temp_email_tags',
                 'temp_email_messages',
                 'temp_emails',
@@ -118,6 +119,46 @@ class ExternalMailboxClaimTests(unittest.TestCase):
                     'imap-password-secret',
                     'http://proxy-secret',
                 ),
+            )
+            db.commit()
+            return cursor.lastrowid
+
+    def _insert_icloud_hme_source(self):
+        with self.app.app_context():
+            db = web_outlook_app.get_db()
+            cursor = db.execute(
+                '''
+                INSERT INTO icloud_hme_sources (
+                    name, region, receiver_email, receiver_provider, receiver_imap_host,
+                    receiver_imap_port, receiver_imap_password, receiver_folder, use_ssl,
+                    cookie, maildomain_host
+                )
+                VALUES (?, 'global', ?, 'custom', 'imap.example.com', 993, ?, 'INBOX', 1, ?, 'maildomain.icloud.com')
+                ''',
+                (
+                    'Claim HME Source',
+                    'receiver@example.com',
+                    web_outlook_app.encrypt_data('receiver-password-secret'),
+                    web_outlook_app.encrypt_data('cookie-secret'),
+                ),
+            )
+            db.commit()
+            return cursor.lastrowid
+
+    def _insert_icloud_hme_account(self, email_addr, group_id, source_id, status='active'):
+        with self.app.app_context():
+            db = web_outlook_app.get_db()
+            cursor = db.execute(
+                '''
+                INSERT INTO accounts (
+                    email, password, client_id, refresh_token, group_id, remark, status,
+                    account_type, provider, imap_host, imap_port, imap_password,
+                    proxy_url, icloud_hme_source_id
+                )
+                VALUES (?, '', '', '', ?, 'hme claim test account', ?, 'icloud_hme',
+                        'icloud_hme', '', 993, '', '', ?)
+                ''',
+                (email_addr, group_id, status, source_id),
             )
             db.commit()
             return cursor.lastrowid
@@ -271,6 +312,58 @@ class ExternalMailboxClaimTests(unittest.TestCase):
         self._assert_claim_mailbox_fields(mailbox)
         serialized = json.dumps(mailbox, ensure_ascii=False)
         for forbidden in ('password', 'refresh_token', 'imap_password', 'proxy_url'):
+            self.assertNotIn(forbidden, serialized)
+
+    def test_external_accounts_serializes_icloud_hme_safely(self):
+        source_id = self._insert_icloud_hme_source()
+        account_id = self._insert_icloud_hme_account('hme-list@icloud.com', self.account_group_id, source_id)
+
+        response = self.client.get(
+            f'/api/external/accounts?group_id={self.account_group_id}',
+            headers=self._headers(),
+        )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        account = next(item for item in payload['accounts'] if item['id'] == account_id)
+        self.assertEqual(account['account_type'], 'icloud_hme')
+        self.assertEqual(account['provider'], 'icloud_hme')
+        self.assertEqual(account['icloud_hme_source_id'], source_id)
+        self.assertEqual(account['icloud_hme_source_name'], 'Claim HME Source')
+        self.assertEqual(account['receiver_email'], 'receiver@example.com')
+        serialized = json.dumps(account, ensure_ascii=False)
+        for forbidden in ('receiver_imap_password', 'cookie', 'receiver-password-secret', 'cookie-secret'):
+            self.assertNotIn(forbidden, serialized)
+
+    def test_load_accounts_serializes_icloud_hme_source_summary_safely(self):
+        source_id = self._insert_icloud_hme_source()
+        account_id = self._insert_icloud_hme_account('hme-ui-list@icloud.com', self.account_group_id, source_id)
+
+        with self.app.app_context():
+            accounts = web_outlook_app.load_accounts(self.account_group_id)
+
+        account = next(item for item in accounts if item['id'] == account_id)
+        self.assertEqual(account['icloud_hme_source_id'], source_id)
+        self.assertEqual(account['icloud_hme_source_name'], 'Claim HME Source')
+        self.assertEqual(account['receiver_email'], 'receiver@example.com')
+        serialized = json.dumps(account, ensure_ascii=False)
+        for forbidden in ('receiver_imap_password', 'cookie', 'receiver-password-secret', 'cookie-secret'):
+            self.assertNotIn(forbidden, serialized)
+
+    def test_claim_icloud_hme_returns_account_resource_and_safe_basic_fields(self):
+        source_id = self._insert_icloud_hme_source()
+        account_id = self._insert_icloud_hme_account('hme-claim@icloud.com', self.account_group_id, source_id)
+
+        response = self._claim(self.account_group_id)
+
+        self.assertEqual(response.status_code, 200)
+        mailbox = self._mailbox(response)
+        self.assertEqual(mailbox['resource_type'], 'account')
+        self.assertEqual(mailbox['resource_id'], account_id)
+        self.assertEqual(mailbox['account_type'], 'icloud_hme')
+        self.assertEqual(mailbox['provider'], 'icloud_hme')
+        serialized = json.dumps(mailbox, ensure_ascii=False)
+        for forbidden in ('receiver_imap_password', 'cookie', 'receiver-password-secret', 'cookie-secret'):
             self.assertNotIn(forbidden, serialized)
 
     def test_claim_temp_email_group_returns_oldest_active_temp_email(self):

@@ -340,6 +340,38 @@ def list_icloud_hme_sources() -> List[Dict]:
     return [serialize_icloud_hme_source(row) for row in rows]
 
 
+def get_icloud_hme_source_summaries(source_ids: List[int], db=None) -> Dict[int, Dict[str, Any]]:
+    normalized_ids = []
+    seen = set()
+    for raw_source_id in source_ids:
+        try:
+            source_id = int(raw_source_id)
+        except (TypeError, ValueError):
+            continue
+        if source_id <= 0 or source_id in seen:
+            continue
+        seen.add(source_id)
+        normalized_ids.append(source_id)
+    if not normalized_ids:
+        return {}
+
+    db = db or get_db()
+    summaries = {}
+    for chunk_ids in chunk_account_ids(normalized_ids):
+        placeholders = ','.join('?' * len(chunk_ids))
+        rows = db.execute(f'''
+            SELECT id, name, receiver_email
+            FROM icloud_hme_sources
+            WHERE id IN ({placeholders})
+        ''', chunk_ids).fetchall()
+        for row in rows:
+            summaries[int(row['id'])] = {
+                'icloud_hme_source_name': row['name'] or '',
+                'receiver_email': row['receiver_email'] or '',
+            }
+    return summaries
+
+
 def validate_icloud_hme_source_required(data: Dict, required_fields: List[str]) -> Optional[str]:
     for field in required_fields:
         if not str(data.get(field) or '').strip():
@@ -458,6 +490,206 @@ def delete_icloud_hme_source(source_id: int) -> bool:
     cursor = db.execute('DELETE FROM icloud_hme_sources WHERE id = ?', (source_id,))
     db.commit()
     return cursor.rowcount > 0
+
+
+def parse_icloud_hme_import_line(line) -> Optional[Dict]:
+    """解析单行 HME 导入文本，只接受 email 或 email----备注。"""
+    raw_line = str(line or '').strip()
+    if not raw_line:
+        return None
+
+    parts = raw_line.split('----', 1)
+    email_addr = normalize_email_address(parts[0])
+    remark = parts[1].strip() if len(parts) > 1 else ''
+    if not re.match(r'^[^@\s]+@[^@\s]+\.[^@\s]+$', email_addr):
+        return None
+
+    return {
+        'email': email_addr,
+        'remark': remark,
+    }
+
+
+def add_icloud_hme_account(email: str, source_id: int, group_id: int,
+                           remark: str = '', status: str = 'active',
+                           tags=None) -> Dict[str, Any]:
+    """创建一个 HME 独立账号记录；HME 地址在 accounts 中全局唯一。"""
+    db = get_db()
+    parsed = parse_icloud_hme_import_line(email)
+    if not parsed:
+        return {'success': False, 'error': 'HME 邮箱格式无效', 'email': str(email or '').strip()}
+
+    source = get_icloud_hme_source_by_id(source_id)
+    if not source:
+        return {'success': False, 'error': 'iCloud HME 接收源不存在', 'email': parsed['email']}
+
+    existing = db.execute(
+        '''
+        SELECT id, email, account_type, provider, icloud_hme_source_id
+        FROM accounts
+        WHERE LOWER(email) = ?
+        LIMIT 1
+        ''',
+        (parsed['email'],)
+    ).fetchone()
+    tags_were_provided = tags is not None
+    normalized_tag_ids = normalize_tag_ids_input(tags)
+    if normalized_tag_ids:
+        placeholders = ','.join('?' * len(normalized_tag_ids))
+        rows = db.execute(
+            f'SELECT id FROM tags WHERE id IN ({placeholders})',
+            normalized_tag_ids
+        ).fetchall()
+        normalized_tag_ids = [int(row['id']) for row in rows]
+
+    if existing:
+        existing_source_id = existing['icloud_hme_source_id']
+        is_same_source = (
+            existing['account_type'] == 'icloud_hme'
+            and existing['provider'] == 'icloud_hme'
+            and existing_source_id is not None
+            and int(existing_source_id) == int(source_id)
+        )
+        if is_same_source:
+            try:
+                account_id = int(existing['id'])
+                db.execute(
+                    '''
+                    UPDATE accounts
+                    SET group_id = ?, remark = ?, status = ?, updated_at = CURRENT_TIMESTAMP
+                    WHERE id = ?
+                    ''',
+                    (
+                        group_id,
+                        str(remark or parsed.get('remark') or '').strip(),
+                        normalize_account_status(status),
+                        account_id,
+                    )
+                )
+                if tags_were_provided:
+                    db.execute('DELETE FROM account_tags WHERE account_id = ?', (account_id,))
+                    if normalized_tag_ids:
+                        db.executemany(
+                            'INSERT OR IGNORE INTO account_tags (account_id, tag_id) VALUES (?, ?)',
+                            [(account_id, tag_id) for tag_id in normalized_tag_ids]
+                        )
+                db.commit()
+                return {
+                    'success': True,
+                    'updated': True,
+                    'account_id': account_id,
+                    'email': parsed['email'],
+                }
+            except Exception as exc:
+                db.rollback()
+                return {'success': False, 'error': str(exc), 'email': parsed['email']}
+        return {
+            'success': False,
+            'conflict': True,
+            'email': parsed['email'],
+            'existing_account_id': int(existing['id']),
+            'existing_source_id': existing_source_id,
+        }
+
+    try:
+        cursor = db.execute(
+            '''
+            INSERT INTO accounts (
+                email, password, client_id, refresh_token, group_id, sort_order, remark,
+                status, account_type, provider, imap_host, imap_port, imap_password,
+                forward_enabled, forward_last_checked_at, proxy_url, fallback_proxy_url_1,
+                fallback_proxy_url_2, icloud_hme_source_id
+            )
+            VALUES (?, '', '', '', ?, NULL, ?, ?, 'icloud_hme', 'icloud_hme', '',
+                    993, '', 0, NULL, '', '', '', ?)
+            ''',
+            (
+                parsed['email'],
+                group_id,
+                str(remark or parsed.get('remark') or '').strip(),
+                normalize_account_status(status),
+                int(source_id),
+            )
+        )
+        account_id = int(cursor.lastrowid)
+        if normalized_tag_ids:
+            db.executemany(
+                'INSERT OR IGNORE INTO account_tags (account_id, tag_id) VALUES (?, ?)',
+                [(account_id, tag_id) for tag_id in normalized_tag_ids]
+            )
+        db.commit()
+        return {'success': True, 'account_id': account_id, 'email': parsed['email']}
+    except sqlite3.IntegrityError:
+        db.rollback()
+        row = db.execute(
+            'SELECT id, icloud_hme_source_id FROM accounts WHERE LOWER(email) = ? LIMIT 1',
+            (parsed['email'],)
+        ).fetchone()
+        return {
+            'success': False,
+            'conflict': True,
+            'email': parsed['email'],
+            'existing_account_id': int(row['id']) if row else None,
+            'existing_source_id': row['icloud_hme_source_id'] if row else None,
+        }
+    except Exception as exc:
+        db.rollback()
+        return {'success': False, 'error': str(exc), 'email': parsed['email']}
+
+
+def import_icloud_hme_accounts(account_string: str, source_id: int, group_id: int,
+                               remark: str = '', status: str = 'active',
+                               tags=None) -> Dict[str, Any]:
+    """批量导入 HME 地址；同 source 重复更新，跨 source 重复返回 conflicts。"""
+    imported = []
+    updated = []
+    conflicts = []
+    errors = []
+    lines = str(account_string or '').splitlines()
+
+    for index, line in enumerate(lines, start=1):
+        if not str(line or '').strip():
+            continue
+        parsed = parse_icloud_hme_import_line(line)
+        if not parsed:
+            errors.append({'line': index, 'value': str(line or '').strip(), 'error': '格式无效'})
+            continue
+
+        row_remark = parsed.get('remark') or str(remark or '').strip()
+        result = add_icloud_hme_account(
+            parsed['email'],
+            source_id,
+            group_id,
+            remark=row_remark,
+            status=status,
+            tags=tags,
+        )
+        if result.get('success') and result.get('updated'):
+            updated.append({'id': result.get('account_id'), 'email': result.get('email')})
+        elif result.get('success'):
+            imported.append({'id': result.get('account_id'), 'email': result.get('email')})
+        elif result.get('conflict'):
+            conflicts.append({
+                'line': index,
+                'email': parsed['email'],
+                'existing_account_id': result.get('existing_account_id'),
+                'existing_source_id': result.get('existing_source_id'),
+            })
+        else:
+            errors.append({
+                'line': index,
+                'email': parsed['email'],
+                'error': result.get('error', '导入失败'),
+            })
+
+    return {
+        'imported_count': len(imported),
+        'updated_count': len(updated),
+        'conflicts': conflicts,
+        'errors': errors,
+        'imported_accounts': imported,
+        'updated_accounts': updated,
+    }
 
 
 def reorder_groups(group_ids: List[int]) -> bool:
@@ -680,11 +912,28 @@ def serialize_account_rows(rows: List[sqlite3.Row], db=None) -> List[Dict]:
     tags_by_account = get_account_tags_map(account_ids, db)
 
     accounts = []
+    hme_source_ids = []
     for row in rows:
         account_id = int(row['id'])
         account = resolve_account_record(row, aliases=aliases_by_account.get(account_id, []))
         account['tags'] = tags_by_account.get(account_id, [])
+        if account.get('account_type') == 'icloud_hme' or account.get('provider') == 'icloud_hme':
+            source_id = account.get('icloud_hme_source_id')
+            account['icloud_hme_source_id'] = source_id
+            if source_id:
+                hme_source_ids.append(source_id)
         accounts.append(account)
+
+    source_summaries = get_icloud_hme_source_summaries(hme_source_ids, db)
+    for account in accounts:
+        if account.get('account_type') == 'icloud_hme' or account.get('provider') == 'icloud_hme':
+            try:
+                source_id = int(account.get('icloud_hme_source_id'))
+            except (TypeError, ValueError):
+                source_id = None
+            summary = source_summaries.get(source_id, {}) if source_id else {}
+            account['icloud_hme_source_name'] = summary.get('icloud_hme_source_name', '')
+            account['receiver_email'] = summary.get('receiver_email', '')
     return accounts
 
 
@@ -1272,6 +1521,12 @@ def serialize_account_summary(account: Dict[str, Any], last_refresh_log: Optiona
     if include_imap_meta:
         payload['imap_host'] = account.get('imap_host', '')
         payload['imap_port'] = account.get('imap_port', 993)
+    if account.get('account_type') == 'icloud_hme' or account.get('provider') == 'icloud_hme':
+        source_id = account.get('icloud_hme_source_id')
+        payload['icloud_hme_source_id'] = source_id
+        source = get_icloud_hme_source_by_id(source_id) if source_id else None
+        payload['icloud_hme_source_name'] = source.get('name', '') if source else ''
+        payload['receiver_email'] = source.get('receiver_email', '') if source else ''
     return payload
 
 
