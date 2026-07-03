@@ -41,6 +41,15 @@ function formatSharedDate(value) {
     }).format(date);
 }
 
+function normalizeSharedProviderLabel(providerLabel, provider, fallback) {
+    const normalizedProvider = String(provider || '').trim().toLowerCase();
+    const normalizedLabel = String(providerLabel || '').trim();
+    if (normalizedProvider === 'icloud_hme' || normalizedLabel.toLowerCase() === 'icloud_hme') {
+        return 'iCloud HME';
+    }
+    return normalizedLabel || provider || fallback;
+}
+
 function setSharedStatus(message, type = 'info') {
     const statusEl = document.getElementById('sharedStatus');
     if (!statusEl) {
@@ -78,7 +87,7 @@ async function loadSharedTempEmail() {
             addressEl.textContent = email.email || defaultName;
         }
         if (expiresEl) {
-            const provider = email.provider_label || email.provider || defaultName;
+            const provider = normalizeSharedProviderLabel(email.provider_label, email.provider, defaultName);
             const expires = email.expires_at ? `有效期至 ${formatSharedDate(email.expires_at)}` : '永久有效';
             expiresEl.textContent = `${provider} · ${expires}`;
         }

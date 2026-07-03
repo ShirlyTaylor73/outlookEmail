@@ -944,6 +944,8 @@ def format_shared_account_detail(detail: Dict[str, Any], account: Dict[str, Any]
 def provider_label_for_account(account: Dict[str, Any]) -> str:
     provider = str(account.get('provider') or '').strip()
     account_type = str(account.get('account_type') or '').strip().lower()
+    if provider == 'icloud_hme' or account_type == 'icloud_hme':
+        return 'iCloud HME'
     if provider:
         return provider.upper() if provider in {'imap', 'pop'} else provider.capitalize()
     return 'IMAP' if account_type == 'imap' else 'Outlook'
@@ -1086,7 +1088,11 @@ def fetch_shared_account_message_detail(account: Dict[str, Any], message_id: str
     fallback_proxy_urls = get_account_proxy_failover_urls(account)
 
     try:
-        if account.get('account_type') == 'imap':
+        if account.get('account_type') == 'icloud_hme':
+            result = fetch_icloud_hme_account_detail_response(
+                account, folder_name, message_id, requested_method or 'imap', requested_id_mode, proxy_url
+            )
+        elif account.get('account_type') == 'imap':
             result = fetch_imap_account_detail_response(
                 account, folder_name, message_id, requested_method or 'imap', requested_id_mode, proxy_url
             )
@@ -1361,6 +1367,17 @@ def api_shared_temp_email_messages(token):
         return error_response
 
     if share_type == 'account':
+        if resource.get('account_type') == 'icloud_hme':
+            result = refresh_shared_account_messages(share, resource)
+            return jsonify({
+                'success': bool(result.get('success')),
+                'share_type': 'account',
+                'emails': result.get('emails', []) if result.get('success') else [],
+                'count': result.get('count', 0) if result.get('success') else 0,
+                'has_more': False,
+                'method': result.get('method', ''),
+                **({'error': result.get('error')} if not result.get('success') else {}),
+            })
         result = fetch_retained_normal_mail_list(resource, 'all', 0, 100)
         emails = format_account_message_list(result.get('emails', []), result) if result.get('success') else []
         return jsonify({
