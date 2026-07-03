@@ -1438,8 +1438,14 @@ def api_refresh_shared_temp_email_messages(token):
     last_refreshed_at = parse_sqlite_timestamp(share.get('last_refreshed_at'))
     if last_refreshed_at and (now - last_refreshed_at).total_seconds() < SHARED_TEMP_EMAIL_REFRESH_THROTTLE_SECONDS:
         if share_type == 'account':
-            result = fetch_retained_normal_mail_list(resource, 'all', 0, 100)
-            formatted = format_account_message_list(result.get('emails', []), result) if result.get('success') else []
+            if resource.get('account_type') == 'icloud_hme':
+                result = refresh_shared_account_messages(share, resource)
+                result['throttled'] = True
+                result['share_type'] = share_type
+                return jsonify(result)
+            else:
+                result = fetch_retained_normal_mail_list(resource, 'all', 0, 100)
+                formatted = format_account_message_list(result.get('emails', []), result) if result.get('success') else []
         else:
             messages = get_temp_email_messages(resource.get('email', ''))
             formatted = format_temp_email_message_list(messages)

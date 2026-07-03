@@ -268,6 +268,95 @@ class ICloudHmeImportTestCase(unittest.TestCase):
         self.assertFalse(data["success"])
         self.assertIn("source_id", data["error"])
 
+    def test_get_hme_account_detail_returns_safe_source_summary(self):
+        source_id = self._create_source(name="Edit Receiver", receiver_email="edit-receiver@example.com")
+        self.client.post("/api/icloud-hme/accounts/import", json={
+            "source_id": source_id,
+            "group_id": 1,
+            "account_string": "edit-hme@icloud.com",
+        })
+        with self.app.app_context():
+            account_id = web_outlook_app.get_db().execute(
+                "SELECT id FROM accounts WHERE email = ?",
+                ("edit-hme@icloud.com",),
+            ).fetchone()["id"]
+
+        response = self.client.get(f"/api/accounts/{account_id}")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        account = payload["account"]
+        self.assertEqual(account["account_type"], "icloud_hme")
+        self.assertEqual(account["provider"], "icloud_hme")
+        self.assertEqual(account["icloud_hme_source_id"], source_id)
+        self.assertEqual(account["icloud_hme_source_name"], "Edit Receiver")
+        self.assertEqual(account["receiver_email"], "edit-receiver@example.com")
+        serialized = str(payload)
+        self.assertNotIn("receiver_imap_password", serialized)
+        self.assertNotIn("app-password", serialized)
+        self.assertNotIn("cookie", serialized)
+        self.assertNotIn("secret-cookie", serialized)
+
+    def test_update_hme_account_saves_source_without_imap_password_or_type_reset(self):
+        first_source_id = self._create_source(name="Old Receiver", receiver_email="old@example.com")
+        second_source_id = self._create_source(name="New Receiver", receiver_email="new@example.com")
+        self.client.post("/api/icloud-hme/accounts/import", json={
+            "source_id": first_source_id,
+            "group_id": 1,
+            "account_string": "edit-hme@icloud.com",
+            "remark": "old remark",
+            "status": "active",
+        })
+        with self.app.app_context():
+            db = web_outlook_app.get_db()
+            account_id = db.execute(
+                "SELECT id FROM accounts WHERE email = ?",
+                ("edit-hme@icloud.com",),
+            ).fetchone()["id"]
+            tag_id = db.execute(
+                "INSERT INTO tags (name, color) VALUES (?, ?)",
+                ("Edited", "#2563eb"),
+            ).lastrowid
+            db.commit()
+
+        response = self.client.put(f"/api/accounts/{account_id}", json={
+            "email": "edit-hme@icloud.com",
+            "account_type": "icloud_hme",
+            "provider": "icloud_hme",
+            "icloud_hme_source_id": second_source_id,
+            "group_id": 1,
+            "remark": "new remark",
+            "status": "inactive",
+            "forward_enabled": True,
+            "tag_ids": [tag_id],
+        })
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertTrue(payload["success"], msg=payload)
+        with self.app.app_context():
+            row = web_outlook_app.get_db().execute(
+                """
+                SELECT email, account_type, provider, icloud_hme_source_id,
+                       imap_password, remark, status, forward_enabled
+                FROM accounts
+                WHERE id = ?
+                """,
+                (account_id,),
+            ).fetchone()
+            tag_rows = web_outlook_app.get_db().execute(
+                "SELECT tag_id FROM account_tags WHERE account_id = ?",
+                (account_id,),
+            ).fetchall()
+        self.assertEqual(row["account_type"], "icloud_hme")
+        self.assertEqual(row["provider"], "icloud_hme")
+        self.assertEqual(row["icloud_hme_source_id"], second_source_id)
+        self.assertEqual(row["imap_password"], "")
+        self.assertEqual(row["remark"], "new remark")
+        self.assertEqual(row["status"], "inactive")
+        self.assertEqual(row["forward_enabled"], 1)
+        self.assertEqual([tag["tag_id"] for tag in tag_rows], [tag_id])
+
 
 if __name__ == '__main__':
     unittest.main()

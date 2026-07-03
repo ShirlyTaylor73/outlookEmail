@@ -4,7 +4,7 @@ import sys
 import tempfile
 import unittest
 from email.message import EmailMessage
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 
 os.environ.setdefault('SECRET_KEY', 'test-secret-key')
@@ -80,6 +80,8 @@ class FakeHmeMail:
 
 class IcloudHmeMailFetchTests(unittest.TestCase):
     def setUp(self):
+        self.app = web_outlook_app.app
+        self.app.config['TESTING'] = True
         web_outlook_app.set_normal_mail_local_retention_enabled_cache(False)
         self.account = {
             'id': 49,
@@ -96,6 +98,7 @@ class IcloudHmeMailFetchTests(unittest.TestCase):
             'provider': 'custom',
             'folder': 'inbox',
             'proxy_url': '',
+            'use_ssl': True,
         }
 
     def _fetch_list_with_messages(self, messages):
@@ -138,13 +141,25 @@ class IcloudHmeMailFetchTests(unittest.TestCase):
         result, _fake_mail = self._fetch_list_with_messages({
             '101': make_raw_message(
                 'Body fallback hit',
-                to='receiver@example.com',
+                to='',
                 body='Your alias abc@icloud.com received a message.',
             ),
         })
 
         self.assertTrue(result['success'])
         self.assertEqual([item['id'] for item in result['emails']], ['101'])
+
+    def test_recipient_header_for_other_alias_blocks_body_fallback(self):
+        result, _fake_mail = self._fetch_list_with_messages({
+            '101': make_raw_message(
+                'Other alias with body mention',
+                to='other@icloud.com',
+                body='Forwarded notice mentions abc@icloud.com in the body.',
+            ),
+        })
+
+        self.assertTrue(result['success'])
+        self.assertEqual(result['emails'], [])
 
     def test_other_hme_address_message_is_filtered_out(self):
         result, _fake_mail = self._fetch_list_with_messages({
@@ -190,6 +205,83 @@ class IcloudHmeMailFetchTests(unittest.TestCase):
             )
 
         self.assertFalse(not_owned['success'])
+
+    def test_hme_source_imap_config_includes_use_ssl(self):
+        with self.app_context_with_hme_source(use_ssl=False) as source_id:
+            config = web_outlook_app.get_icloud_hme_source_imap_config({
+                'email': 'abc@icloud.com',
+                'icloud_hme_source_id': source_id,
+            })
+
+        self.assertFalse(config['use_ssl'])
+
+    def test_hme_fetch_uses_plain_imap_when_source_ssl_disabled(self):
+        fake_mail = FakeHmeMail({
+            '101': make_raw_message(
+                'Plain IMAP hit',
+                extra_headers={'Delivered-To': 'abc@icloud.com'},
+            ),
+        })
+        plain_calls = []
+
+        class PlainImapFactory:
+            error = web_outlook_app.imaplib.IMAP4.error
+
+            def __call__(self, host, port, timeout=None):
+                plain_calls.append((host, port, timeout))
+                return fake_mail
+
+        config = dict(self.source_config, use_ssl=False)
+        with patch.object(web_outlook_app, 'get_icloud_hme_source_imap_config', return_value=config), \
+             patch.object(web_outlook_app.imaplib, 'IMAP4', PlainImapFactory()), \
+             patch.object(web_outlook_app.imaplib, 'IMAP4_SSL', Mock(side_effect=AssertionError('SSL should not be used'))):
+            result = web_outlook_app.fetch_account_emails(self.account, 'inbox', 0, 20)
+
+        self.assertTrue(result['success'], msg=result)
+        self.assertEqual([item['id'] for item in result['emails']], ['101'])
+        self.assertEqual(plain_calls, [('imap.example.com', 993, web_outlook_app.IMAP_TIMEOUT)])
+
+    def app_context_with_hme_source(self, *, use_ssl):
+        return HmeSourceContext(self.app, use_ssl=use_ssl)
+
+
+class HmeSourceContext:
+    def __init__(self, app, *, use_ssl):
+        self.app = app
+        self.use_ssl = use_ssl
+        self.context = None
+        self.source_id = None
+
+    def __enter__(self):
+        self.context = self.app.app_context()
+        self.context.__enter__()
+        web_outlook_app.init_db()
+        db = web_outlook_app.get_db()
+        for table in ('accounts', 'icloud_hme_sources'):
+            db.execute(f'DELETE FROM {table}')
+        cursor = db.execute(
+            '''
+            INSERT INTO icloud_hme_sources (
+                name, region, receiver_email, receiver_provider, receiver_imap_host,
+                receiver_imap_port, receiver_imap_password, receiver_folder, use_ssl,
+                cookie, maildomain_host
+            )
+            VALUES (?, 'global', ?, 'custom', ?, 143, ?, 'INBOX', ?, '', '')
+            ''',
+            (
+                'Plain Source',
+                'receiver@example.com',
+                'imap.example.com',
+                web_outlook_app.encrypt_data('source-password'),
+                1 if self.use_ssl else 0,
+            ),
+        )
+        db.commit()
+        self.source_id = cursor.lastrowid
+        return self.source_id
+
+    def __exit__(self, exc_type, exc, tb):
+        return self.context.__exit__(exc_type, exc, tb)
 
 
 if __name__ == '__main__':

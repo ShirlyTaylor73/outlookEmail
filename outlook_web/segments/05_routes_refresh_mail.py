@@ -2892,7 +2892,8 @@ def fetch_icloud_hme_folder_emails(account: Dict[str, Any], folder: str,
         mail = create_imap_connection(
             source_config.get('imap_host', ''),
             source_config.get('imap_port', 993),
-            source_config.get('proxy_url', '')
+            source_config.get('proxy_url', ''),
+            source_config.get('use_ssl', True)
         )
         try:
             mail.login(source_config.get('email_addr', ''), source_config.get('imap_password', ''))
@@ -3036,7 +3037,8 @@ def fetch_icloud_hme_account_detail_response(account: Dict[str, Any], folder: st
         mail = create_imap_connection(
             source_config.get('imap_host', ''),
             source_config.get('imap_port', 993),
-            source_config.get('proxy_url', '')
+            source_config.get('proxy_url', ''),
+            source_config.get('use_ssl', True)
         )
         try:
             mail.login(source_config.get('email_addr', ''), source_config.get('imap_password', ''))

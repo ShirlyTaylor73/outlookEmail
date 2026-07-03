@@ -1295,8 +1295,9 @@ def email_message_belongs_to_hme(message, raw_body, hme_address) -> bool:
     if not normalized_hme:
         return False
 
-    if normalized_hme in extract_message_addresses(message, ICLOUD_HME_RECIPIENT_HEADERS):
-        return True
+    recipient_addresses = extract_message_addresses(message, ICLOUD_HME_RECIPIENT_HEADERS)
+    if recipient_addresses:
+        return normalized_hme in recipient_addresses
 
     body_text = get_email_message_text_body(message)
     if not body_text and raw_body:
@@ -1347,6 +1348,7 @@ def get_icloud_hme_source_imap_config(account) -> Dict:
         'imap_port': int(source.get('receiver_imap_port') or 993),
         'provider': source.get('receiver_provider') or 'custom',
         'folder': source.get('receiver_folder') or 'inbox',
+        'use_ssl': bool(source.get('use_ssl', True)),
         'proxy_url': get_account_proxy_url(account or {}),
     }
 
@@ -1355,20 +1357,21 @@ def has_message_attachments(msg) -> bool:
     return len(extract_message_attachments(msg)) > 0
 
 
-def create_imap_connection(imap_host: str, imap_port: int = 993, proxy_url: str = ''):
+def create_imap_connection(imap_host: str, imap_port: int = 993, proxy_url: str = '', use_ssl: bool = True):
     host = (imap_host or '').strip()
     port = int(imap_port or 993)
     if not host:
         raise ValueError('IMAP host 不能为空')
+    connection_cls = imaplib.IMAP4_SSL if use_ssl else imaplib.IMAP4
     try:
         with proxy_socket_context(proxy_url):
-            return imaplib.IMAP4_SSL(host, port, timeout=IMAP_TIMEOUT)
+            return connection_cls(host, port, timeout=IMAP_TIMEOUT)
     except TypeError:
         old_timeout = socket.getdefaulttimeout()
         socket.setdefaulttimeout(IMAP_TIMEOUT)
         try:
             with proxy_socket_context(proxy_url):
-                return imaplib.IMAP4_SSL(host, port)
+                return connection_cls(host, port)
         finally:
             socket.setdefaulttimeout(old_timeout)
 

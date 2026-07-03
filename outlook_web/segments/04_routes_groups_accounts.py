@@ -1911,37 +1911,45 @@ def api_get_account(account_id):
     account = get_account_by_id(account_id)
     if not account:
         return jsonify({'success': False, 'error': '账号不存在'})
-    
+
+    account_payload = {
+        'id': account['id'],
+        'email': account['email'],
+        'password': account['password'],
+        'client_id': account['client_id'],
+        'refresh_token': account['refresh_token'],
+        'account_type': account.get('account_type', 'outlook'),
+        'provider': account.get('provider', 'outlook'),
+        'imap_host': account.get('imap_host', ''),
+        'imap_port': account.get('imap_port', 993),
+        'imap_password': account.get('imap_password', ''),
+        'aliases': account.get('aliases', []),
+        'alias_count': account.get('alias_count', 0),
+        'matched_alias': account.get('matched_alias', ''),
+        'forward_enabled': bool(account.get('forward_enabled')),
+        'forward_last_checked_at': account.get('forward_last_checked_at', ''),
+        'proxy_url': account.get('proxy_url', '') or '',
+        'fallback_proxy_url_1': account.get('fallback_proxy_url_1', '') or '',
+        'fallback_proxy_url_2': account.get('fallback_proxy_url_2', '') or '',
+        'proxy_override_enabled': account_has_proxy_override(account),
+        'group_id': account.get('group_id'),
+        'group_name': account.get('group_name', '默认分组'),
+        'sort_order': normalize_account_sort_order(account.get('sort_order', 0)),
+        'remark': account.get('remark', ''),
+        'status': account.get('status', 'active'),
+        'created_at': account.get('created_at', ''),
+        'updated_at': account.get('updated_at', '')
+    }
+    if account.get('account_type') == 'icloud_hme' or account.get('provider') == 'icloud_hme':
+        source_id = account.get('icloud_hme_source_id')
+        source = get_icloud_hme_source_by_id(source_id) if source_id else None
+        account_payload['icloud_hme_source_id'] = source_id
+        account_payload['icloud_hme_source_name'] = source.get('name', '') if source else ''
+        account_payload['receiver_email'] = source.get('receiver_email', '') if source else ''
+
     return jsonify({
         'success': True,
-        'account': {
-            'id': account['id'],
-            'email': account['email'],
-            'password': account['password'],
-            'client_id': account['client_id'],
-            'refresh_token': account['refresh_token'],
-            'account_type': account.get('account_type', 'outlook'),
-            'provider': account.get('provider', 'outlook'),
-            'imap_host': account.get('imap_host', ''),
-            'imap_port': account.get('imap_port', 993),
-            'imap_password': account.get('imap_password', ''),
-            'aliases': account.get('aliases', []),
-            'alias_count': account.get('alias_count', 0),
-            'matched_alias': account.get('matched_alias', ''),
-            'forward_enabled': bool(account.get('forward_enabled')),
-            'forward_last_checked_at': account.get('forward_last_checked_at', ''),
-            'proxy_url': account.get('proxy_url', '') or '',
-            'fallback_proxy_url_1': account.get('fallback_proxy_url_1', '') or '',
-            'fallback_proxy_url_2': account.get('fallback_proxy_url_2', '') or '',
-            'proxy_override_enabled': account_has_proxy_override(account),
-            'group_id': account.get('group_id'),
-            'group_name': account.get('group_name', '默认分组'),
-            'sort_order': normalize_account_sort_order(account.get('sort_order', 0)),
-            'remark': account.get('remark', ''),
-            'status': account.get('status', 'active'),
-            'created_at': account.get('created_at', ''),
-            'updated_at': account.get('updated_at', '')
-        }
+        'account': account_payload
     })
 
 

@@ -1301,6 +1301,8 @@ def api_update_account_v2(account_id):
     ).strip()
     aliases_provided = 'aliases' in data
     aliases = parse_alias_payload(data.get('aliases', [])) if aliases_provided else []
+    tags_provided = 'tag_ids' in data or 'tags' in data
+    tag_ids = normalize_tag_ids_input(data.get('tag_ids', data.get('tags', []))) if tags_provided else []
 
     try:
         group_id = int(group_id or 1)
@@ -1313,7 +1315,84 @@ def api_update_account_v2(account_id):
         return jsonify({'success': False, 'error': 'IMAP 端口无效'})
 
     provider_meta = get_provider_meta(provider, email_addr)
+    is_icloud_hme = account_type == 'icloud_hme' or provider == 'icloud_hme' or provider_meta['key'] == 'icloud_hme'
     is_outlook = account_type == 'outlook' or provider_meta['key'] == 'outlook'
+
+    if is_icloud_hme:
+        if not current_account:
+            return jsonify({'success': False, 'error': '账号不存在'}), 404
+        if not email_addr:
+            return jsonify({'success': False, 'error': '邮箱不能为空'})
+        try:
+            icloud_hme_source_id = int(data.get('icloud_hme_source_id') or 0)
+        except (TypeError, ValueError):
+            icloud_hme_source_id = 0
+        source = get_icloud_hme_source_by_id(icloud_hme_source_id) if icloud_hme_source_id > 0 else None
+        if not source:
+            return jsonify({'success': False, 'error': 'HME 接收邮箱源不存在'})
+        if aliases_provided:
+            _, alias_errors = validate_account_aliases(account_id, email_addr, aliases)
+            if alias_errors:
+                return jsonify({'success': False, 'error': '；'.join(alias_errors), 'errors': alias_errors})
+
+        db = get_db()
+        try:
+            should_init_forward_cursor = bool(
+                forward_enabled and current_account and not current_account.get('forward_enabled')
+            )
+            forward_last_checked_at = (
+                datetime.now(timezone.utc).isoformat()
+                if should_init_forward_cursor
+                else current_account.get('forward_last_checked_at')
+            )
+            db.execute(
+                '''
+                UPDATE accounts
+                SET email = ?, password = '', client_id = '', refresh_token = ?,
+                    group_id = ?, sort_order = ?, remark = ?, status = ?,
+                    account_type = 'icloud_hme', provider = 'icloud_hme',
+                    imap_host = '', imap_port = 993, imap_password = '',
+                    forward_enabled = ?, forward_last_checked_at = ?,
+                    proxy_url = ?, fallback_proxy_url_1 = ?, fallback_proxy_url_2 = ?,
+                    icloud_hme_source_id = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+                ''',
+                (
+                    email_addr, '', group_id, sort_order, remark, status,
+                    1 if forward_enabled else 0, forward_last_checked_at,
+                    proxy_url, fallback_proxy_url_1, fallback_proxy_url_2,
+                    icloud_hme_source_id, account_id
+                )
+            )
+            if tags_provided:
+                valid_tag_ids = []
+                if tag_ids:
+                    placeholders = ','.join('?' * len(tag_ids))
+                    rows = db.execute(
+                        f'SELECT id FROM tags WHERE id IN ({placeholders})',
+                        tag_ids
+                    ).fetchall()
+                    existing_ids = {int(row['id']) for row in rows}
+                    valid_tag_ids = [tag_id for tag_id in tag_ids if tag_id in existing_ids]
+                db.execute('DELETE FROM account_tags WHERE account_id = ?', (account_id,))
+                if valid_tag_ids:
+                    db.executemany(
+                        'INSERT OR IGNORE INTO account_tags (account_id, tag_id) VALUES (?, ?)',
+                        [(account_id, tag_id) for tag_id in valid_tag_ids]
+                    )
+            cleaned_aliases = get_account_aliases(account_id)
+            if aliases_provided:
+                alias_success, cleaned_aliases, alias_errors = replace_account_aliases(
+                    account_id, email_addr, aliases, db
+                )
+                if not alias_success:
+                    db.rollback()
+                    return jsonify({'success': False, 'error': '；'.join(alias_errors), 'errors': alias_errors})
+            db.commit()
+            return jsonify({'success': True, 'message': '账号更新成功', 'aliases': cleaned_aliases})
+        except Exception:
+            db.rollback()
+            return jsonify({'success': False, 'error': '更新失败'})
 
     if is_outlook:
         if not email_addr or not client_id or not refresh_token:
