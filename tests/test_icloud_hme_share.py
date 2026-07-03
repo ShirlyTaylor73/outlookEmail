@@ -157,7 +157,7 @@ class IcloudHmeShareTests(unittest.TestCase):
         self.assertEqual(account_arg['provider'], 'icloud_hme')
         self.assertEqual((folder_arg, skip_arg, top_arg), ('all', 0, 50))
 
-    def test_hme_shared_refresh_throttle_still_fetches_hme_messages(self):
+    def test_hme_shared_refresh_throttle_uses_local_cache_without_fetching_upstream(self):
         account_id = self._create_hme_account('throttle-hme@icloud.com')
         share = self._create_share(account_id)
         with self.app.app_context():
@@ -170,7 +170,19 @@ class IcloudHmeShareTests(unittest.TestCase):
 
         with patch.object(web_outlook_app, 'fetch_retained_normal_mail_list', return_value={
             'success': True,
-            'emails': [],
+            'emails': [{
+                'id': 'hme-cached-1',
+                'from': 'sender@example.com',
+                'to': 'throttle-hme@icloud.com',
+                'subject': 'HME cached',
+                'body_preview': 'cached preview',
+                'date': '2026-06-01T00:00:00Z',
+                'folder': 'inbox',
+                'id_mode': 'uid',
+                'method': 'local',
+            }],
+            'method': 'Local Retention',
+            'request_method': 'local',
         }) as retained_mock, patch.object(web_outlook_app, 'fetch_account_emails', return_value={
             'success': True,
             'method': 'imap',
@@ -192,9 +204,39 @@ class IcloudHmeShareTests(unittest.TestCase):
         self.assertTrue(payload['success'], msg=payload)
         self.assertTrue(payload['throttled'])
         self.assertEqual(payload['share_type'], 'account')
-        self.assertEqual(payload['emails'][0]['id'], 'hme-throttled-1')
-        fetch_mock.assert_called_once()
-        retained_mock.assert_not_called()
+        self.assertEqual(payload['emails'][0]['id'], 'hme-cached-1')
+        self.assertEqual(payload['emails'][0]['method'], 'local')
+        fetch_mock.assert_not_called()
+        retained_mock.assert_called_once()
+
+    def test_hme_shared_refresh_throttle_with_empty_cache_does_not_fetch_upstream(self):
+        account_id = self._create_hme_account('empty-throttle-hme@icloud.com')
+        share = self._create_share(account_id)
+        with self.app.app_context():
+            db = web_outlook_app.get_db()
+            db.execute(
+                "UPDATE account_shares SET last_refreshed_at = CURRENT_TIMESTAMP WHERE id = ?",
+                (share["id"],),
+            )
+            db.commit()
+
+        with patch.object(web_outlook_app, 'fetch_retained_normal_mail_list', return_value={
+            'success': True,
+            'emails': [],
+            'method': 'Local Retention',
+            'request_method': 'local',
+        }) as retained_mock, patch.object(web_outlook_app, 'fetch_account_emails') as fetch_mock:
+            response = self.public_client.post(f'/api/shared/{share["token"]}/refresh')
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertTrue(payload['success'], msg=payload)
+        self.assertTrue(payload['throttled'])
+        self.assertEqual(payload['share_type'], 'account')
+        self.assertEqual(payload['emails'], [])
+        self.assertEqual(payload['count'], 0)
+        fetch_mock.assert_not_called()
+        retained_mock.assert_called_once()
 
     def test_hme_shared_detail_uses_hme_detail_branch_and_sanitizes_detail_payload(self):
         account_id = self._create_hme_account('detail-hme@icloud.com')
