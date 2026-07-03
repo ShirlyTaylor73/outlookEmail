@@ -6,6 +6,19 @@ The format is based on Keep a Changelog, and this project follows Semantic Versi
 
 ## [Unreleased]
 
+## [2.0.61] - 2026-07-03
+
+### Added
+- 新增 HME source/folder 邮件同步水位，记录已同步状态、UID/sequence 进度和同步诊断数据。
+
+### Changed
+- HME 邮箱普通打开会信任已同步 source cache，即使当前 HME 地址本地筛选为空也不再前台重扫 IMAP。
+- HME 手动刷新改为基于 source 水位拉取新邮件，避免重复扫描已缓存旧邮件。
+
+### Fixed
+- 修复新建或无邮件 HME 地址打开时因本地结果为空而反复扫描同一 Gmail/IMAP 接收源的问题。
+- 修复 source 同步匹配 0 封邮件时没有持久化“已同步为空”状态的问题。
+
 ## [2.0.60] - 2026-07-03
 
 ### Added
