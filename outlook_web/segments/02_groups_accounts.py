@@ -266,6 +266,200 @@ def get_group_temp_email_count(group_id: int, db=None) -> int:
     return int(row['count']) if row else 0
 
 
+# ==================== iCloud Hide My Email 接收源 ====================
+
+ICLOUD_HME_REGIONS = {'global', 'china'}
+
+
+def normalize_icloud_hme_region(value) -> str:
+    """归一化 iCloud HME 区域，未知值回退到 global。"""
+    region = str(value or '').strip().lower()
+    return region if region in ICLOUD_HME_REGIONS else 'global'
+
+
+def normalize_icloud_hme_bool(value, default: bool = True) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, str):
+        return value.strip().lower() in {'1', 'true', 'yes', 'on'}
+    return bool(value)
+
+
+def normalize_icloud_hme_port(value) -> int:
+    try:
+        port = int(value or 993)
+    except (TypeError, ValueError):
+        return 993
+    return port if 1 <= port <= 65535 else 993
+
+
+def serialize_icloud_hme_source(row, include_secret: bool = False) -> Dict:
+    """序列化 HME 接收源；默认不返回密码和 Cookie。"""
+    if not row:
+        return {}
+
+    source = dict(row)
+    serialized = {
+        'id': source.get('id'),
+        'name': source.get('name') or '',
+        'region': normalize_icloud_hme_region(source.get('region')),
+        'receiver_email': source.get('receiver_email') or '',
+        'receiver_provider': source.get('receiver_provider') or 'custom',
+        'receiver_imap_host': source.get('receiver_imap_host') or '',
+        'receiver_imap_port': int(source.get('receiver_imap_port') or 993),
+        'receiver_folder': source.get('receiver_folder') or 'INBOX',
+        'use_ssl': bool(source.get('use_ssl')),
+        'maildomain_host': source.get('maildomain_host') or '',
+        'last_sync_at': source.get('last_sync_at'),
+        'last_sync_status': source.get('last_sync_status') or 'never',
+        'last_sync_error': source.get('last_sync_error'),
+        'created_at': source.get('created_at'),
+        'updated_at': source.get('updated_at'),
+    }
+    if include_secret:
+        encrypted_password = source.get('receiver_imap_password') or ''
+        encrypted_cookie = source.get('cookie') or ''
+        serialized['receiver_imap_password'] = decrypt_data(encrypted_password) if encrypted_password else ''
+        serialized['cookie'] = decrypt_data(encrypted_cookie) if encrypted_cookie else ''
+    return serialized
+
+
+def get_icloud_hme_source_by_id(source_id: int, include_secret: bool = False) -> Optional[Dict]:
+    db = get_db()
+    row = db.execute('SELECT * FROM icloud_hme_sources WHERE id = ?', (source_id,)).fetchone()
+    return serialize_icloud_hme_source(row, include_secret=include_secret) if row else None
+
+
+def list_icloud_hme_sources() -> List[Dict]:
+    db = get_db()
+    rows = db.execute('''
+        SELECT *
+        FROM icloud_hme_sources
+        ORDER BY created_at DESC, id DESC
+    ''').fetchall()
+    return [serialize_icloud_hme_source(row) for row in rows]
+
+
+def validate_icloud_hme_source_required(data: Dict, required_fields: List[str]) -> Optional[str]:
+    for field in required_fields:
+        if not str(data.get(field) or '').strip():
+            return f'缺少必填字段: {field}'
+    return None
+
+
+def create_icloud_hme_source(data) -> Dict:
+    payload = data or {}
+    required_error = validate_icloud_hme_source_required(
+        payload,
+        ['name', 'receiver_email', 'receiver_imap_host', 'receiver_imap_password'],
+    )
+    if required_error:
+        raise ValueError(required_error)
+
+    db = get_db()
+    cursor = db.execute(
+        '''
+        INSERT INTO icloud_hme_sources (
+            name, region, receiver_email, receiver_provider, receiver_imap_host,
+            receiver_imap_port, receiver_imap_password, receiver_folder, use_ssl,
+            cookie, maildomain_host, updated_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+        ''',
+        (
+            str(payload.get('name') or '').strip(),
+            normalize_icloud_hme_region(payload.get('region')),
+            str(payload.get('receiver_email') or '').strip(),
+            str(payload.get('receiver_provider') or 'custom').strip() or 'custom',
+            str(payload.get('receiver_imap_host') or '').strip(),
+            normalize_icloud_hme_port(payload.get('receiver_imap_port')),
+            encrypt_data(str(payload.get('receiver_imap_password') or '')),
+            str(payload.get('receiver_folder') or 'INBOX').strip() or 'INBOX',
+            1 if normalize_icloud_hme_bool(payload.get('use_ssl'), True) else 0,
+            encrypt_data(str(payload.get('cookie') or '').strip()) if str(payload.get('cookie') or '').strip() else '',
+            str(payload.get('maildomain_host') or '').strip(),
+        )
+    )
+    db.commit()
+    source = get_icloud_hme_source_by_id(int(cursor.lastrowid))
+    return source or {}
+
+
+def update_icloud_hme_source(source_id: int, data) -> Optional[Dict]:
+    payload = data or {}
+    db = get_db()
+    current = db.execute('SELECT * FROM icloud_hme_sources WHERE id = ?', (source_id,)).fetchone()
+    if not current:
+        return None
+
+    fields = []
+    params = []
+    text_fields = {
+        'name',
+        'receiver_email',
+        'receiver_provider',
+        'receiver_imap_host',
+        'receiver_folder',
+        'maildomain_host',
+    }
+    for field in text_fields:
+        if field in payload:
+            fields.append(f'{field} = ?')
+            params.append(str(payload.get(field) or '').strip())
+
+    if 'region' in payload:
+        fields.append('region = ?')
+        params.append(normalize_icloud_hme_region(payload.get('region')))
+    if 'receiver_imap_port' in payload:
+        fields.append('receiver_imap_port = ?')
+        params.append(normalize_icloud_hme_port(payload.get('receiver_imap_port')))
+    if 'use_ssl' in payload:
+        fields.append('use_ssl = ?')
+        params.append(1 if normalize_icloud_hme_bool(payload.get('use_ssl'), True) else 0)
+    if str(payload.get('receiver_imap_password') or '').strip():
+        fields.append('receiver_imap_password = ?')
+        params.append(encrypt_data(str(payload.get('receiver_imap_password') or '').strip()))
+    if payload.get('clear_cookie') is True:
+        fields.append('cookie = ?')
+        params.append('')
+    elif str(payload.get('cookie') or '').strip():
+        fields.append('cookie = ?')
+        params.append(encrypt_data(str(payload.get('cookie') or '').strip()))
+
+    if fields:
+        fields.append('updated_at = CURRENT_TIMESTAMP')
+        params.append(source_id)
+        db.execute(
+            f'''
+            UPDATE icloud_hme_sources
+            SET {', '.join(fields)}
+            WHERE id = ?
+            ''',
+            tuple(params)
+        )
+        db.commit()
+
+    return get_icloud_hme_source_by_id(source_id)
+
+
+def delete_icloud_hme_source(source_id: int) -> bool:
+    db = get_db()
+    bound = db.execute(
+        '''
+        SELECT COUNT(*) AS count
+        FROM accounts
+        WHERE account_type = 'icloud_hme' AND icloud_hme_source_id = ?
+        ''',
+        (source_id,)
+    ).fetchone()
+    if bound and int(bound['count'] or 0) > 0:
+        return False
+
+    cursor = db.execute('DELETE FROM icloud_hme_sources WHERE id = ?', (source_id,))
+    db.commit()
+    return cursor.rowcount > 0
+
+
 def reorder_groups(group_ids: List[int]) -> bool:
     """重新排序分组。"""
     db = get_db()

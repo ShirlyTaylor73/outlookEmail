@@ -216,6 +216,124 @@ def get_csrf_token():
     return response
 
 
+# ==================== iCloud Hide My Email Source API ====================
+
+@app.route('/api/icloud-hme/sources', methods=['GET'])
+@login_required
+def api_get_icloud_hme_sources():
+    return jsonify({
+        'success': True,
+        'sources': list_icloud_hme_sources(),
+    })
+
+
+@app.route('/api/icloud-hme/sources', methods=['POST'])
+@login_required
+def api_create_icloud_hme_source():
+    data = request.get_json(silent=True) or {}
+    try:
+        source = create_icloud_hme_source(data)
+    except ValueError as exc:
+        return jsonify({'success': False, 'error': str(exc)}), 400
+    except Exception:
+        return jsonify({'success': False, 'error': '创建 iCloud HME 接收源失败'}), 500
+
+    return jsonify({
+        'success': True,
+        'source': source,
+        'message': 'iCloud HME 接收源创建成功',
+    }), 201
+
+
+@app.route('/api/icloud-hme/sources/<int:source_id>', methods=['GET'])
+@login_required
+def api_get_icloud_hme_source(source_id):
+    source = get_icloud_hme_source_by_id(source_id)
+    if not source:
+        return jsonify({'success': False, 'error': 'iCloud HME 接收源不存在'}), 404
+    return jsonify({'success': True, 'source': source})
+
+
+@app.route('/api/icloud-hme/sources/<int:source_id>', methods=['PUT'])
+@login_required
+def api_update_icloud_hme_source(source_id):
+    data = request.get_json(silent=True) or {}
+    try:
+        source = update_icloud_hme_source(source_id, data)
+    except Exception:
+        return jsonify({'success': False, 'error': '更新 iCloud HME 接收源失败'}), 500
+
+    if not source:
+        return jsonify({'success': False, 'error': 'iCloud HME 接收源不存在'}), 404
+    return jsonify({
+        'success': True,
+        'source': source,
+        'message': 'iCloud HME 接收源更新成功',
+    })
+
+
+@app.route('/api/icloud-hme/sources/<int:source_id>', methods=['DELETE'])
+@login_required
+def api_delete_icloud_hme_source(source_id):
+    if not get_icloud_hme_source_by_id(source_id):
+        return jsonify({'success': False, 'error': 'iCloud HME 接收源不存在'}), 404
+
+    if not delete_icloud_hme_source(source_id):
+        return jsonify({
+            'success': False,
+            'error': '该 iCloud HME 接收源已绑定账号，不能删除',
+        }), 400
+    return jsonify({'success': True, 'message': 'iCloud HME 接收源已删除'})
+
+
+def serialize_imap_folder_listing(folder_rows) -> List[str]:
+    folders = []
+    for row in folder_rows or []:
+        text = row.decode('utf-8', 'replace') if isinstance(row, bytes) else str(row)
+        folder_name = text.rsplit(' ', 1)[-1].strip().strip('"')
+        if folder_name:
+            folders.append(folder_name)
+    return folders
+
+
+@app.route('/api/icloud-hme/sources/test-imap', methods=['POST'])
+@login_required
+def api_test_icloud_hme_source_imap():
+    data = request.get_json(silent=True) or {}
+    host = str(data.get('receiver_imap_host') or '').strip()
+    email_addr = str(data.get('receiver_email') or '').strip()
+    password = str(data.get('receiver_imap_password') or '').strip()
+    folder = str(data.get('receiver_folder') or 'INBOX').strip() or 'INBOX'
+    port = normalize_icloud_hme_port(data.get('receiver_imap_port'))
+    use_ssl = normalize_icloud_hme_bool(data.get('use_ssl'), True)
+
+    if not host or not email_addr or not password:
+        return jsonify({'success': False, 'error': '接收邮箱、IMAP 服务器和密码不能为空', 'available_folders': []}), 400
+
+    imap_client = None
+    try:
+        imap_client = imaplib.IMAP4_SSL(host, port) if use_ssl else imaplib.IMAP4(host, port)
+        imap_client.login(email_addr, password)
+        list_status, folder_rows = imap_client.list()
+        available_folders = serialize_imap_folder_listing(folder_rows if list_status == 'OK' else [])
+        select_status, _ = imap_client.select(folder)
+        if select_status != 'OK':
+            return jsonify({
+                'success': False,
+                'error': f'无法选择文件夹: {folder}',
+                'available_folders': available_folders,
+            })
+        return jsonify({'success': True, 'error': '', 'available_folders': available_folders})
+    except Exception as exc:
+        return jsonify({'success': False, 'error': str(exc), 'available_folders': []})
+    finally:
+        if imap_client:
+            try:
+                imap_client.logout()
+            except Exception:
+                pass
+
+
 # ==================== 分组 API ====================
 
 @app.route('/api/groups', methods=['GET'])
