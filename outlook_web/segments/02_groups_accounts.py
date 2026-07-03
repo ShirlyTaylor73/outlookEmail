@@ -692,6 +692,135 @@ def import_icloud_hme_accounts(account_string: str, source_id: int, group_id: in
     }
 
 
+def update_icloud_hme_source_sync_state(source_id: int, status: str, error: str = '') -> None:
+    db = get_db()
+    db.execute(
+        '''
+        UPDATE icloud_hme_sources
+        SET last_sync_at = CURRENT_TIMESTAMP,
+            last_sync_status = ?,
+            last_sync_error = ?,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+        ''',
+        (status, str(error or '').strip() or None, int(source_id))
+    )
+    db.commit()
+
+
+def extract_icloud_hme_sync_email(item: Any) -> str:
+    if isinstance(item, str):
+        return normalize_email_address(item)
+    if not isinstance(item, dict):
+        return ''
+
+    for key in ('hme', 'email', 'address', 'hmeEmail', 'privateRelayAddress'):
+        email_addr = normalize_email_address(item.get(key))
+        if email_addr:
+            return email_addr
+    return ''
+
+
+def extract_icloud_hme_sync_label(item: Any) -> str:
+    if not isinstance(item, dict):
+        return ''
+    for key in ('label', 'note', 'description', 'remark', 'name'):
+        label = str(item.get(key) or '').strip()
+        if label:
+            return label
+    return ''
+
+
+def extract_icloud_hme_sync_active(item: Any) -> bool:
+    if not isinstance(item, dict):
+        return True
+    for key in ('isActive', 'active', 'enabled'):
+        if key in item:
+            return normalize_icloud_hme_bool(item.get(key), True)
+
+    status = str(item.get('status') or item.get('state') or '').strip().lower()
+    if status in {'inactive', 'disabled', 'deactivated', 'deleted'}:
+        return False
+    return True
+
+
+def sync_icloud_hme_source_accounts(source_id: int) -> Dict[str, Any]:
+    """同步 iCloud HME 已有地址到账户表，不迁移跨 source 已存在地址。"""
+    source = get_icloud_hme_source_by_id(source_id, include_secret=True)
+    if not source:
+        return {'success': False, 'error': 'iCloud HME 接收源不存在'}
+
+    cookie = str(source.get('cookie') or '').strip()
+    if not cookie:
+        error = 'iCloud Cookie 为空，无法同步 HME 地址'
+        update_icloud_hme_source_sync_state(source_id, 'failed', error)
+        return {'success': False, 'error': error}
+
+    list_result = fetch_icloud_hme_list(
+        cookie,
+        source.get('region') or 'global',
+        source.get('maildomain_host') or '',
+    )
+    if not list_result.get('success'):
+        error = str(list_result.get('error') or '获取 iCloud HME 地址列表失败')
+        update_icloud_hme_source_sync_state(source_id, 'failed', error)
+        return {'success': False, 'error': error}
+
+    group_id = get_default_account_group_id(get_db()) or 1
+    created = []
+    updated = []
+    conflicts = []
+    errors = []
+    inactive_count = 0
+
+    for index, item in enumerate(list_result.get('hmeEmails') or [], start=1):
+        email_addr = extract_icloud_hme_sync_email(item)
+        if not email_addr:
+            errors.append({'index': index, 'error': 'HME 邮箱格式无效'})
+            continue
+
+        active = extract_icloud_hme_sync_active(item)
+        if not active:
+            inactive_count += 1
+        result = add_icloud_hme_account(
+            email_addr,
+            source_id,
+            group_id,
+            remark=extract_icloud_hme_sync_label(item),
+            status='active' if active else 'inactive',
+        )
+        if result.get('success') and result.get('updated'):
+            updated.append({'id': result.get('account_id'), 'email': result.get('email')})
+        elif result.get('success'):
+            created.append({'id': result.get('account_id'), 'email': result.get('email')})
+        elif result.get('conflict'):
+            conflicts.append({
+                'index': index,
+                'email': email_addr,
+                'existing_account_id': result.get('existing_account_id'),
+                'existing_source_id': result.get('existing_source_id'),
+            })
+        else:
+            errors.append({
+                'index': index,
+                'email': email_addr,
+                'error': result.get('error', '同步失败'),
+            })
+
+    update_icloud_hme_source_sync_state(source_id, 'success', '')
+    return {
+        'success': True,
+        'source_id': int(source_id),
+        'created': len(created),
+        'updated': len(updated),
+        'inactive': inactive_count,
+        'conflicts': conflicts,
+        'errors': errors,
+        'created_accounts': created,
+        'updated_accounts': updated,
+    }
+
+
 def reorder_groups(group_ids: List[int]) -> bool:
     """重新排序分组。"""
     db = get_db()

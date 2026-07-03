@@ -286,6 +286,16 @@ def api_delete_icloud_hme_source(source_id):
     return jsonify({'success': True, 'message': 'iCloud HME 接收源已删除'})
 
 
+@app.route('/api/icloud-hme/sources/<int:source_id>/sync', methods=['POST'])
+@login_required
+def api_sync_icloud_hme_source(source_id):
+    result = sync_icloud_hme_source_accounts(source_id)
+    if not result.get('success'):
+        status_code = 404 if result.get('error') == 'iCloud HME 接收源不存在' else 400
+        return jsonify(result), status_code
+    return jsonify(result)
+
+
 def resolve_icloud_hme_import_source_id(raw_source_id):
     if raw_source_id not in (None, ''):
         try:

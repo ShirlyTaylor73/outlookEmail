@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import json
 import secrets
+import urllib.error
+import urllib.request
 
 from email.utils import getaddresses
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
@@ -137,6 +140,85 @@ def post_with_proxy_fallback(url: str, *, proxy_url: str = None,
         fallback_proxy_urls=fallback_proxy_urls,
         **kwargs
     )
+
+
+def fetch_icloud_hme_list(cookie: str, region: str = 'global',
+                          maildomain_host: str = '') -> Dict[str, Any]:
+    """调用 iCloud 网页内部 HME list endpoint，返回统一结果结构。"""
+    cookie_value = str(cookie or '').strip()
+    if not cookie_value:
+        return {'success': False, 'error': 'iCloud Cookie 不能为空'}
+
+    normalized_region = str(region or '').strip().lower()
+    is_china_region = normalized_region == 'china'
+    web_origin = 'https://www.icloud.com.cn' if is_china_region else 'https://www.icloud.com'
+    default_host = 'p217-maildomainws.icloud.com.cn' if is_china_region else 'p68-maildomainws.icloud.com'
+    host = str(maildomain_host or '').strip() or default_host
+    endpoint = f'https://{host}/v2/hme/list'
+
+    headers = {
+        'Accept': 'application/json, text/plain, */*',
+        'Cookie': cookie_value,
+        'Origin': web_origin,
+        'Referer': f'{web_origin}/',
+        'User-Agent': (
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
+            'AppleWebKit/537.36 (KHTML, like Gecko) '
+            'Chrome/126.0.0.0 Safari/537.36'
+        ),
+    }
+    request_obj = urllib.request.Request(endpoint, headers=headers, method='GET')
+
+    try:
+        with urllib.request.urlopen(request_obj, timeout=HTTP_REQUEST_TIMEOUT) as response:
+            raw_body = response.read()
+    except urllib.error.HTTPError as exc:
+        try:
+            details = exc.read().decode('utf-8', 'replace')
+        except Exception:
+            details = ''
+        return {
+            'success': False,
+            'error': sanitize_error_details(f'iCloud HME list 请求失败: HTTP {exc.code} {details}'),
+        }
+    except Exception as exc:
+        return {
+            'success': False,
+            'error': sanitize_error_details(f'iCloud HME list 请求失败: {exc}'),
+        }
+
+    try:
+        payload = json.loads(raw_body.decode('utf-8', 'replace'))
+    except Exception as exc:
+        return {
+            'success': False,
+            'error': sanitize_error_details(f'iCloud HME list 响应解析失败: {exc}'),
+        }
+
+    if isinstance(payload, dict) and payload.get('success') is False:
+        return {
+            'success': False,
+            'error': str(payload.get('error') or payload.get('message') or 'iCloud HME list 请求失败'),
+        }
+
+    hme_emails = []
+    if isinstance(payload, dict):
+        for key in ('hmeEmails', 'hmeEmailList', 'emails', 'items', 'result'):
+            value = payload.get(key)
+            if isinstance(value, list):
+                hme_emails = value
+                break
+        if not hme_emails and isinstance(payload.get('data'), dict):
+            data = payload.get('data') or {}
+            for key in ('hmeEmails', 'hmeEmailList', 'emails', 'items'):
+                value = data.get(key)
+                if isinstance(value, list):
+                    hme_emails = value
+                    break
+    elif isinstance(payload, list):
+        hme_emails = payload
+
+    return {'success': True, 'hmeEmails': hme_emails}
 
 
 GRAPH_DEFAULT_TOKEN_SCOPE = "https://graph.microsoft.com/.default"
