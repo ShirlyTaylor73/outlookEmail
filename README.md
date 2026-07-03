@@ -329,6 +329,27 @@ user@example.com----app-password
 user@example.com----app-password----imap.example.com----993
 ```
 
+#### iCloud Hide My Email (HME)
+
+iCloud Hide My Email (HME) 地址按独立邮箱账号管理。导入后，每个 HME 地址都会出现在普通邮箱分组中，可以像其他普通邮箱一样读取邮件、分享只读页面，并通过对外 API 查询。
+
+导入 HME 地址前，必须先在系统中配置 HME 接收源。接收源负责读取这些 HME 地址实际转发到的收件箱，可以选择：
+
+- iCloud Mail
+- Gmail
+- 自定义 IMAP
+
+HME 导入格式如下：
+
+```text
+hme@icloud.com
+hme@icloud.com----备注
+```
+
+阶段 2 的 HME 同步需要配置 iCloud Cookie，用于从 Apple 网页端同步 HME 地址列表。该能力依赖 Apple 网页端内部接口；如果 Apple 调整接口、鉴权或页面行为，同步功能可能需要随之更新。
+
+出于安全考虑，HME 接收源密码和 iCloud Cookie 不会在导出文件、公开分享页面或对外 API 响应中返回。
+
 支持批量导入，每行一个账号。导入文件格式保持不变；导入弹窗可为本次新增账号统一设置备注、标签、状态，并可选择是否立即开启邮件转发。普通邮箱导入时不能选择临时邮箱分组。
 
 ### 3. 查看邮件
