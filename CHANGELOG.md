@@ -6,6 +6,21 @@ The format is based on Keep a Changelog, and this project follows Semantic Versi
 
 ## [Unreleased]
 
+## [2.0.59] - 2026-07-03
+
+### Added
+- 新增 iCloud Hide My Email (HME) 邮箱集成，HME 地址可作为独立普通邮箱账号管理。
+- 新增 HME 接收源管理，支持配置 iCloud Mail、Gmail 或自定义 IMAP 接收源，并可通过可选 iCloud Cookie 同步已有 HME 地址。
+- HME 邮箱支持分组、独立邮件查看、账号分享、外部 API、验证码读取和领取流程。
+
+### Changed
+- 公开分享、外部 API 和账号序列化会将 HME 继续作为 `resource_type=account` 暴露，并过滤接收源密码、Cookie 和内部 maildomain 配置。
+- HME 邮件列表与详情读取会通过共享接收源 IMAP 拉信，并按 HME 地址做归属校验。
+
+### Fixed
+- HME 公开分享刷新节流期间不再触发上游 IMAP 拉信，改为复用本地保留缓存。
+- HME 邮件正文 fallback 归属判断改为仅在缺少可解析收件头时启用，避免跨 HME 地址误归属。
+
 ## [2.0.58] - 2026-06-01
 
 ### Added
