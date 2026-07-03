@@ -6,6 +6,22 @@ The format is based on Keep a Changelog, and this project follows Semantic Versi
 
 ## [Unreleased]
 
+## [2.0.60] - 2026-07-03
+
+### Added
+- 新增 HME 接收源级本地邮件缓存，多个 HME 地址共享同一 IMAP 接收源时只按 source 同步一次。
+- HME source cache 支持按独立 HME 地址筛选邮件列表、详情、验证码读取、公开分享和外部 API。
+
+### Changed
+- HME 邮箱打开默认优先读取本地 source cache，并在需要时按接收源触发增量同步。
+- HME `folder=all` 改为从本地缓存合并收件箱和垃圾邮件，避免对同一 IMAP 源重复扫描。
+- HME 设置中 Maildomain Host 默认留空，由区域自动选择可用端点。
+
+### Fixed
+- 修复同一 Gmail/IMAP 接收源下多个 HME 地址打开时反复扫描全部邮件的问题。
+- 修复 HME 公开分享刷新限流时读取普通邮箱缓存导致分享页不显示邮件的问题。
+- 修复 HME IMAP 扫描超时和诊断日志不足导致已匹配邮件难以定位的问题。
+
 ## [2.0.59] - 2026-07-03
 
 ### Added

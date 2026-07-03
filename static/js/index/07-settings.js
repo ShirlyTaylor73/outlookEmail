@@ -835,7 +835,7 @@
                 icloudHmeReceiverImapPort: '993',
                 icloudHmeReceiverImapPassword: '',
                 icloudHmeReceiverFolder: 'INBOX',
-                icloudHmeMaildomainHost: 'maildomain.icloud.com',
+                icloudHmeMaildomainHost: '',
                 icloudHmeCookie: ''
             };
             Object.entries(defaults).forEach(([id, value]) => {
@@ -867,7 +867,7 @@
                 icloudHmeReceiverImapPort: source.receiver_imap_port || 993,
                 icloudHmeReceiverImapPassword: source.receiver_imap_password || '',
                 icloudHmeReceiverFolder: source.receiver_folder || 'INBOX',
-                icloudHmeMaildomainHost: source.maildomain_host || 'maildomain.icloud.com',
+                icloudHmeMaildomainHost: source.maildomain_host || '',
                 icloudHmeCookie: source.cookie || ''
             };
             Object.entries(values).forEach(([id, value]) => {
@@ -921,7 +921,7 @@
                 receiver_folder: document.getElementById('icloudHmeReceiverFolder')?.value.trim() || 'INBOX',
                 use_ssl: !!document.getElementById('icloudHmeUseSsl')?.checked,
                 cookie: document.getElementById('icloudHmeCookie')?.value.trim() || '',
-                maildomain_host: document.getElementById('icloudHmeMaildomainHost')?.value.trim() || 'maildomain.icloud.com'
+                maildomain_host: document.getElementById('icloudHmeMaildomainHost')?.value.trim() || ''
             };
         }
 

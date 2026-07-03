@@ -362,7 +362,8 @@
                     method: requestMethod,
                     folder: requestFolder,
                     skip: 0,
-                    top: 20
+                    top: 20,
+                    ...(options.forceRefresh === true ? { force: '1' } : {})
                 }),
                 {
                     timeoutMs: EMAIL_LIST_REQUEST_TIMEOUT_MS,
@@ -473,7 +474,7 @@
                     startedBackgroundSync = true;
                     return;
                 }
-                await fetchRemoteEmails(email, cacheKey);
+                await fetchRemoteEmails(email, cacheKey, { forceRefresh });
             } catch (error) {
                 const errorMessage = isTimeoutAbortError(error)
                     ? '获取邮件超时，请重试'

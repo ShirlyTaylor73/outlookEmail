@@ -2880,24 +2880,584 @@ def build_hme_imap_error(code: str, message: str, error_type: str,
     }
 
 
-def fetch_icloud_hme_folder_emails(account: Dict[str, Any], folder: str,
-                                  skip: int, top: int) -> Dict[str, Any]:
-    folder_name = normalize_folder_name(folder)
-    mail = None
+HME_SOURCE_SYNC_LOCKS: Dict[int, threading.Lock] = {}
+HME_SOURCE_SYNC_LOCKS_GUARD = threading.Lock()
+HME_SOURCE_BACKGROUND_SYNC_RECENT_SECONDS = 60
+
+
+def get_hme_source_sync_lock(source_id: int) -> threading.Lock:
+    with HME_SOURCE_SYNC_LOCKS_GUARD:
+        lock = HME_SOURCE_SYNC_LOCKS.get(source_id)
+        if lock is None:
+            lock = threading.Lock()
+            HME_SOURCE_SYNC_LOCKS[source_id] = lock
+        return lock
+
+
+def get_icloud_hme_source_imap_config_by_id(source_id: int, proxy_url: str = '') -> Dict[str, Any]:
+    source = get_icloud_hme_source_by_id(source_id, include_secret=True)
+    if not source:
+        raise ValueError('HME 接收邮箱源不存在')
+    return {
+        'email_addr': source.get('receiver_email') or '',
+        'imap_password': source.get('receiver_imap_password') or '',
+        'imap_host': source.get('receiver_imap_host') or '',
+        'imap_port': int(source.get('receiver_imap_port') or 993),
+        'provider': source.get('receiver_provider') or 'custom',
+        'folder': source.get('receiver_folder') or 'inbox',
+        'use_ssl': bool(source.get('use_ssl', True)),
+        'proxy_url': proxy_url or '',
+    }
+
+
+def normalize_hme_source_id(account: Dict[str, Any]) -> int:
     try:
-        source_config = get_icloud_hme_source_imap_config(account)
-        receiver_folder = hme_source_folder_for_request(source_config, folder_name)
-        skip = max(0, int(skip or 0))
-        top = max(1, int(top or 20))
+        return int((account or {}).get('icloud_hme_source_id') or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def hme_source_folders_for_request(folder: str) -> List[str]:
+    folder_name = normalize_folder_name(folder)
+    if folder_name == 'all':
+        return ['inbox', 'junkemail']
+    return [folder_name]
+
+
+def get_icloud_hme_source_addresses(source_id: int, db=None) -> List[str]:
+    if not source_id:
+        return []
+    database = db or get_db()
+    rows = database.execute(
+        '''
+        SELECT email
+        FROM accounts
+        WHERE icloud_hme_source_id = ?
+          AND (account_type = 'icloud_hme' OR provider = 'icloud_hme')
+        ''',
+        (source_id,)
+    ).fetchall()
+    addresses = []
+    seen = set()
+    for row in rows:
+        normalized = normalize_hme_address(row['email'])
+        if normalized and normalized not in seen:
+            seen.add(normalized)
+            addresses.append(normalized)
+    return addresses
+
+
+def extract_hme_recipients_for_source(message, raw_body, source_addresses: List[str]) -> List[str]:
+    source_set = {normalize_hme_address(address) for address in source_addresses if normalize_hme_address(address)}
+    if not source_set:
+        return []
+
+    recipient_addresses = extract_message_addresses(message, ICLOUD_HME_RECIPIENT_HEADERS)
+    if recipient_addresses:
+        return sorted(source_set.intersection(recipient_addresses))
+
+    body_text = get_email_message_text_body(message)
+    if not body_text and raw_body:
+        if isinstance(raw_body, (bytes, bytearray, memoryview)):
+            raw_bytes = bytes(raw_body)
+        else:
+            raw_bytes = str(raw_body).encode('utf-8', errors='ignore')
+        body_text = raw_bytes.decode('utf-8', errors='ignore')
+    lowered_body = str(body_text or '').lower()
+    return sorted(address for address in source_set if address in lowered_body)
+
+
+def hme_source_provider_message_id(uid: Any) -> str:
+    if isinstance(uid, (bytes, bytearray, memoryview)):
+        return bytes(uid).decode('utf-8', errors='ignore')
+    return str(uid or '').strip()
+
+
+def build_icloud_hme_source_message_row(source_id: int, folder: str, uid: Any,
+                                        raw_email: Any, fetch_response_text: str,
+                                        id_mode: str) -> Dict[str, Any]:
+    msg = email.message_from_bytes(raw_email) if isinstance(raw_email, (bytes, bytearray, memoryview)) else raw_email
+    body_text, body_html = extract_text_and_html(msg)
+    preview_source = body_text or strip_html_content(body_html)
+    received_at = extract_imap_internaldate(fetch_response_text) or msg.get('Date', '')
+    attachments = normalize_retained_mail_attachment_metadata(extract_message_attachments(msg))
+    return {
+        'source_id': int(source_id),
+        'folder': normalize_folder_name(folder),
+        'provider_message_id': hme_source_provider_message_id(uid),
+        'id_mode': str(id_mode or '').strip().lower() or 'uid',
+        'subject': decode_header_value(msg.get('Subject', '无主题')) or '无主题',
+        'sender': decode_header_value(msg.get('From', '未知')) or '未知',
+        'recipients': decode_header_value(msg.get('To', '')),
+        'cc': decode_header_value(msg.get('Cc', '')),
+        'received_at': received_at,
+        'received_at_sort': retained_mail_received_at_sort(received_at),
+        'is_read': 1 if re.search(r'\\Seen\b', fetch_response_text or '', flags=re.IGNORECASE) else 0,
+        'has_attachments': 1 if attachments or has_message_attachments(msg) else 0,
+        'body_preview': (preview_source[:200] + ('...' if len(preview_source) > 200 else '')) if preview_source else '',
+        'body': body_html or body_text or '',
+        'body_type': 'html' if body_html else 'text',
+        'attachments_json': json.dumps(attachments, ensure_ascii=False),
+    }
+
+
+def upsert_icloud_hme_source_message(row: Dict[str, Any], recipients: List[str], db=None) -> int:
+    if not row or not recipients:
+        return 0
+    database = db or get_db()
+    database.execute(
+        '''
+        INSERT INTO icloud_hme_source_messages (
+            source_id, folder, provider_message_id, id_mode,
+            subject, sender, recipients, cc, received_at, received_at_sort,
+            is_read, has_attachments, body_preview, body, body_type, attachments_json,
+            list_cached, body_cached, list_cached_at, body_cached_at, last_synced_at, updated_at
+        )
+        VALUES (
+            :source_id, :folder, :provider_message_id, :id_mode,
+            :subject, :sender, :recipients, :cc, :received_at, :received_at_sort,
+            :is_read, :has_attachments, :body_preview, :body, :body_type, :attachments_json,
+            1, 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+        )
+        ON CONFLICT(source_id, folder, provider_message_id, id_mode)
+        DO UPDATE SET
+            subject = excluded.subject,
+            sender = excluded.sender,
+            recipients = excluded.recipients,
+            cc = excluded.cc,
+            received_at = excluded.received_at,
+            received_at_sort = excluded.received_at_sort,
+            is_read = excluded.is_read,
+            has_attachments = excluded.has_attachments,
+            body_preview = excluded.body_preview,
+            body = excluded.body,
+            body_type = excluded.body_type,
+            attachments_json = excluded.attachments_json,
+            list_cached = 1,
+            body_cached = 1,
+            list_cached_at = CURRENT_TIMESTAMP,
+            body_cached_at = CURRENT_TIMESTAMP,
+            last_synced_at = CURRENT_TIMESTAMP,
+            updated_at = CURRENT_TIMESTAMP
+        ''',
+        row
+    )
+    message_row = database.execute(
+        '''
+        SELECT id
+        FROM icloud_hme_source_messages
+        WHERE source_id = ? AND folder = ? AND provider_message_id = ? AND id_mode = ?
+        ''',
+        (row['source_id'], row['folder'], row['provider_message_id'], row['id_mode'])
+    ).fetchone()
+    if not message_row:
+        return 0
+    source_message_id = int(message_row['id'])
+    normalized_recipients = sorted({
+        normalize_hme_address(address)
+        for address in recipients
+        if normalize_hme_address(address)
+    })
+    database.executemany(
+        '''
+        INSERT OR IGNORE INTO icloud_hme_source_message_recipients (
+            source_message_id, source_id, hme_address
+        )
+        VALUES (?, ?, ?)
+        ''',
+        [(source_message_id, int(row['source_id']), address) for address in normalized_recipients]
+    )
+    database.commit()
+    return source_message_id
+
+
+def icloud_hme_source_row_to_list_item(row) -> Dict[str, Any]:
+    item = {
+        'id': row['provider_message_id'],
+        'subject': row['subject'] or '无主题',
+        'from': row['sender'] or '未知',
+        'to': row['recipients'] or '',
+        'date': row['received_at'] or '',
+        'is_read': bool(row['is_read']),
+        'has_attachments': bool(row['has_attachments']),
+        'body_preview': row['body_preview'] or '',
+        'folder': row['folder'] or 'inbox',
+        'id_mode': row['id_mode'] or 'uid',
+        'method': 'imap',
+    }
+    return item
+
+
+def icloud_hme_source_row_to_detail_response(row) -> Dict[str, Any]:
+    return {
+        'success': True,
+        'email': {
+            'id': row['provider_message_id'],
+            'subject': row['subject'] or '无主题',
+            'from': row['sender'] or '未知',
+            'to': row['recipients'] or '',
+            'cc': row['cc'] or '',
+            'date': row['received_at'] or '',
+            'body': row['body'] or '',
+            'body_type': row['body_type'] or 'text',
+            'attachments': parse_retained_mail_attachments(row['attachments_json']),
+            'has_attachments': bool(row['has_attachments']),
+            'folder': row['folder'] or 'inbox',
+            'id_mode': row['id_mode'] or 'uid',
+        },
+        'method': 'IMAP (HME Cached)',
+        'source': 'icloud_hme_source_cache',
+        'request_method': 'local',
+        'local_retention': True,
+    }
+
+
+def count_icloud_hme_source_cached_messages(source_id: int, folders: List[str], db=None) -> int:
+    if not source_id:
+        return 0
+    normalized_folders = [normalize_folder_name(folder) for folder in folders or []]
+    database = db or get_db()
+    params: List[Any] = [source_id]
+    folder_filter = ''
+    if normalized_folders and 'all' not in normalized_folders:
+        placeholders = ','.join('?' for _ in normalized_folders)
+        folder_filter = f'AND folder IN ({placeholders})'
+        params.extend(normalized_folders)
+    row = database.execute(
+        f'''
+        SELECT COUNT(*) AS count
+        FROM icloud_hme_source_messages
+        WHERE source_id = ? AND list_cached = 1 {folder_filter}
+        ''',
+        params
+    ).fetchone()
+    return int(row['count'] if row else 0)
+
+
+def is_icloud_hme_source_cache_recent(source_id: int, folders: List[str],
+                                      max_age_seconds: int = HME_SOURCE_BACKGROUND_SYNC_RECENT_SECONDS) -> bool:
+    if not source_id:
+        return False
+    normalized_folders = [normalize_folder_name(folder) for folder in folders or []]
+    params: List[Any] = [source_id]
+    folder_filter = ''
+    if normalized_folders and 'all' not in normalized_folders:
+        placeholders = ','.join('?' for _ in normalized_folders)
+        folder_filter = f'AND folder IN ({placeholders})'
+        params.extend(normalized_folders)
+    row = get_db().execute(
+        f'''
+        SELECT CASE
+            WHEN MAX(last_synced_at) IS NULL THEN 0
+            WHEN (julianday('now') - julianday(MAX(last_synced_at))) * 86400 <= ? THEN 1
+            ELSE 0
+        END AS recent
+        FROM icloud_hme_source_messages
+        WHERE source_id = ? AND list_cached = 1 {folder_filter}
+        ''',
+        [max_age_seconds, *params]
+    ).fetchone()
+    return bool(row and int(row['recent'] or 0))
+
+
+def fetch_cached_icloud_hme_source_messages(account: Dict[str, Any], folder: str,
+                                            skip: int, top: int) -> Dict[str, Any]:
+    source_id = normalize_hme_source_id(account)
+    hme_address = normalize_hme_address((account or {}).get('email'))
+    folder_name = normalize_folder_name(folder)
+    if not source_id or not hme_address:
+        return {
+            'success': True,
+            'emails': [],
+            'has_more': False,
+            'method': 'IMAP (HME Cached)',
+            'request_method': 'local',
+            'source': 'icloud_hme_source_cache',
+        }
+
+    params: List[Any] = [source_id, hme_address]
+    folder_filter = ''
+    if folder_name != 'all':
+        folder_filter = 'AND m.folder = ?'
+        params.append(folder_name)
+
+    db = get_db()
+    total_row = db.execute(
+        f'''
+        SELECT COUNT(*) AS count
+        FROM icloud_hme_source_messages m
+        JOIN icloud_hme_source_message_recipients r ON r.source_message_id = m.id
+        WHERE m.source_id = ?
+          AND r.hme_address = ?
+          AND m.list_cached = 1
+          {folder_filter}
+        ''',
+        params
+    ).fetchone()
+    total_count = int(total_row['count'] if total_row else 0)
+    rows = db.execute(
+        f'''
+        SELECT m.provider_message_id, m.id_mode, m.folder, m.subject, m.sender,
+               m.recipients, m.received_at, m.is_read, m.has_attachments, m.body_preview
+        FROM icloud_hme_source_messages m
+        JOIN icloud_hme_source_message_recipients r ON r.source_message_id = m.id
+        WHERE m.source_id = ?
+          AND r.hme_address = ?
+          AND m.list_cached = 1
+          {folder_filter}
+        ORDER BY m.received_at_sort DESC, m.id DESC
+        LIMIT ? OFFSET ?
+        ''',
+        params + [top + 1, skip]
+    ).fetchall()
+    emails = [icloud_hme_source_row_to_list_item(row) for row in rows[:top]]
+    return {
+        'success': True,
+        'emails': emails,
+        'has_more': len(rows) > top or total_count > skip + len(emails),
+        'count': total_count,
+        'method': 'IMAP (HME Cached)',
+        'source': 'icloud_hme_source_cache',
+        'request_method': 'local',
+        'local_retention': True,
+        'folder': folder_name,
+    }
+
+
+def fetch_cached_icloud_hme_source_detail(account: Dict[str, Any], folder: str,
+                                          message_id: str, id_mode: str = '') -> Optional[Dict[str, Any]]:
+    source_id = normalize_hme_source_id(account)
+    hme_address = normalize_hme_address((account or {}).get('email'))
+    provider_message_id = str(message_id or '').strip()
+    if not source_id or not hme_address or not provider_message_id:
+        return None
+
+    folder_name = normalize_folder_name(folder)
+    requested_id_mode = str(id_mode or '').strip().lower()
+    params: List[Any] = [source_id, hme_address, provider_message_id]
+    folder_filter = ''
+    id_mode_filter = ''
+    if folder_name != 'all':
+        folder_filter = 'AND m.folder = ?'
+        params.append(folder_name)
+    if requested_id_mode:
+        id_mode_filter = 'AND m.id_mode = ?'
+        params.append(requested_id_mode)
+
+    row = get_db().execute(
+        f'''
+        SELECT m.provider_message_id, m.id_mode, m.folder, m.subject, m.sender,
+               m.recipients, m.cc, m.received_at, m.body, m.body_type,
+               m.attachments_json, m.has_attachments
+        FROM icloud_hme_source_messages m
+        JOIN icloud_hme_source_message_recipients r ON r.source_message_id = m.id
+        WHERE m.source_id = ?
+          AND r.hme_address = ?
+          AND m.provider_message_id = ?
+          AND m.body_cached = 1
+          {folder_filter}
+          {id_mode_filter}
+        ORDER BY COALESCE(m.body_cached_at, m.updated_at, m.created_at) DESC, m.id DESC
+        LIMIT 1
+        ''',
+        params
+    ).fetchone()
+    if not row:
+        return None
+    return icloud_hme_source_row_to_detail_response(row)
+
+
+def sync_icloud_hme_source_messages(source_id: int, folders: List[str],
+                                    force: bool = False, proxy_url: str = '') -> Dict[str, Any]:
+    source_id = int(source_id or 0)
+    if not source_id:
+        return {'success': False, 'error': 'HME source_id 不能为空'}
+    normalized_folders = [normalize_folder_name(folder) for folder in (folders or ['inbox'])]
+    normalized_folders = [folder for folder in normalized_folders if folder in VALID_MAIL_FOLDERS and folder != 'all']
+    if not normalized_folders:
+        normalized_folders = ['inbox']
+
+    lock = get_hme_source_sync_lock(source_id)
+    acquired = lock.acquire(blocking=bool(force))
+    if not acquired:
+        return {'success': True, 'skipped': True, 'reason': 'source_sync_running'}
+
+    mail = None
+    started_at = time.monotonic()
+    synced_count = 0
+    matched_count = 0
+    scanned_count = 0
+    partial = False
+    try:
+        db = get_db()
+        source_addresses = get_icloud_hme_source_addresses(source_id, db=db)
+        if not source_addresses:
+            return {'success': True, 'synced_count': 0, 'matched_count': 0, 'scanned_count': 0}
+
+        source_config = get_icloud_hme_source_imap_config_by_id(source_id, proxy_url=proxy_url)
         mail = create_imap_connection(
             source_config.get('imap_host', ''),
             source_config.get('imap_port', 993),
             source_config.get('proxy_url', ''),
             source_config.get('use_ssl', True)
         )
+        mail.login(source_config.get('email_addr', ''), source_config.get('imap_password', ''))
+        provider = source_config.get('provider', 'custom')
+        imap_host = source_config.get('imap_host', '')
+        send_imap_id(mail, provider, imap_host)
+        scan_timeout_seconds = get_hme_folder_scan_timeout_seconds()
+
+        for folder_name in normalized_folders:
+            if time.monotonic() - started_at >= scan_timeout_seconds:
+                partial = True
+                break
+            receiver_folder = hme_source_folder_for_request(source_config, folder_name)
+            selected, folder_diagnostics = resolve_imap_folder(mail, provider, receiver_folder, readonly=True)
+            if not selected:
+                continue
+
+            selected_exists = 0
+            for attempt in reversed(folder_diagnostics.get('select_attempts') or []):
+                if str(attempt.get('status') or '') == 'OK':
+                    selected_exists = extract_imap_exists_count(attempt.get('response'))
+                    if selected_exists > 0:
+                        break
+
+            message_ids, search_mode, _search_attempts = search_imap_message_ids(mail)
+            if message_ids is None:
+                continue
+            if not message_ids and selected_exists > 0:
+                message_ids = build_sequence_message_ids(selected_exists)
+                search_mode = 'sequence'
+
+            for uid in reversed(message_ids or []):
+                if time.monotonic() - started_at >= scan_timeout_seconds:
+                    partial = True
+                    break
+                scanned_count += 1
+                fetch_status, fetch_data, fetch_mode, _fetch_attempts = fetch_imap_message(
+                    mail, uid, '(FLAGS INTERNALDATE RFC822)', preferred_mode=search_mode or 'uid'
+                )
+                if fetch_status != 'OK' or not fetch_data:
+                    continue
+                raw_email, fetch_response_text = parse_imap_fetch_response(fetch_data)
+                if not raw_email:
+                    continue
+                msg = email.message_from_bytes(raw_email)
+                recipients = extract_hme_recipients_for_source(msg, raw_email, source_addresses)
+                if not recipients:
+                    continue
+                matched_count += 1
+                row = build_icloud_hme_source_message_row(
+                    source_id,
+                    folder_name,
+                    uid,
+                    raw_email,
+                    fetch_response_text,
+                    fetch_mode or search_mode or 'uid',
+                )
+                if upsert_icloud_hme_source_message(row, recipients, db=db):
+                    synced_count += 1
+
+        return {
+            'success': True,
+            'synced_count': synced_count,
+            'matched_count': matched_count,
+            'scanned_count': scanned_count,
+            'partial': partial,
+        }
+    except Exception as exc:
+        return build_hme_imap_error(
+            'IMAP_CONNECT_FAILED',
+            sanitize_error_details(str(exc)) or 'IMAP 连接失败',
+            type(exc).__name__,
+            502,
+        )
+    finally:
+        if mail:
+            try:
+                mail.logout()
+            except Exception:
+                pass
+        lock.release()
+
+
+def start_icloud_hme_source_background_sync(source_id: int, folders: List[str], proxy_url: str = '') -> None:
+    if not source_id or is_icloud_hme_source_cache_recent(source_id, folders):
+        return
+
+    def run_sync():
+        with app.app_context():
+            sync_icloud_hme_source_messages(source_id, folders, force=False, proxy_url=proxy_url)
+
+    thread = threading.Thread(
+        target=run_sync,
+        name=f'icloud-hme-source-sync-{source_id}',
+        daemon=True,
+    )
+    thread.start()
+
+
+def get_hme_folder_scan_timeout_seconds() -> float:
+    try:
+        overall_timeout = float(MAIL_FETCH_OVERALL_TIMEOUT)
+    except (TypeError, ValueError):
+        overall_timeout = 50.0
+    return max(1.0, min(overall_timeout * 0.85, 45.0))
+
+
+def fetch_icloud_hme_folder_emails(account: Dict[str, Any], folder: str,
+                                  skip: int, top: int) -> Dict[str, Any]:
+    folder_name = normalize_folder_name(folder)
+    mail = None
+    started_at = time.monotonic()
+    hme_address = account.get('email', '')
+    account_id = account.get('id')
+    try:
+        source_config = get_icloud_hme_source_imap_config(account)
+        receiver_folder = hme_source_folder_for_request(source_config, folder_name)
+        skip = max(0, int(skip or 0))
+        top = max(1, int(top or 20))
+        app.logger.warning(
+            "[HME_FETCH_DIAG] start account_id=%s hme=%s requested_folder=%s receiver_folder=%s "
+            "receiver=%s provider=%s host=%s port=%s ssl=%s skip=%s top=%s",
+            account_id,
+            hme_address,
+            folder_name,
+            receiver_folder,
+            source_config.get('email_addr', ''),
+            source_config.get('provider', 'custom'),
+            source_config.get('imap_host', ''),
+            source_config.get('imap_port', 993),
+            source_config.get('use_ssl', True),
+            skip,
+            top,
+        )
+        mail = create_imap_connection(
+            source_config.get('imap_host', ''),
+            source_config.get('imap_port', 993),
+            source_config.get('proxy_url', ''),
+            source_config.get('use_ssl', True)
+        )
+        app.logger.warning(
+            "[HME_FETCH_DIAG] connected account_id=%s hme=%s folder=%s elapsed=%.2fs",
+            account_id,
+            hme_address,
+            receiver_folder,
+            time.monotonic() - started_at,
+        )
         try:
             mail.login(source_config.get('email_addr', ''), source_config.get('imap_password', ''))
         except imaplib.IMAP4.error as exc:
+            app.logger.warning(
+                "[HME_FETCH_DIAG] login_failed account_id=%s hme=%s receiver=%s host=%s error=%s elapsed=%.2fs",
+                account_id,
+                hme_address,
+                source_config.get('email_addr', ''),
+                source_config.get('imap_host', ''),
+                sanitize_error_details(str(exc)),
+                time.monotonic() - started_at,
+            )
             return build_hme_imap_error(
                 'IMAP_AUTH_FAILED',
                 normalize_imap_auth_error(
@@ -2908,11 +3468,27 @@ def fetch_icloud_hme_folder_emails(account: Dict[str, Any], folder: str,
                 'IMAPAuthError',
                 401,
             )
+        app.logger.warning(
+            "[HME_FETCH_DIAG] login_ok account_id=%s hme=%s receiver=%s elapsed=%.2fs",
+            account_id,
+            hme_address,
+            source_config.get('email_addr', ''),
+            time.monotonic() - started_at,
+        )
 
         provider = source_config.get('provider', 'custom')
         imap_host = source_config.get('imap_host', '')
         imap_id_info = send_imap_id(mail, provider, imap_host)
         selected, folder_diagnostics = resolve_imap_folder(mail, provider, receiver_folder, readonly=True)
+        app.logger.warning(
+            "[HME_FETCH_DIAG] select_result account_id=%s hme=%s folder=%s selected=%s attempts=%s elapsed=%.2fs",
+            account_id,
+            hme_address,
+            receiver_folder,
+            selected,
+            len(folder_diagnostics.get('select_attempts') or []),
+            time.monotonic() - started_at,
+        )
         if not selected:
             if imap_id_info:
                 folder_diagnostics = {**folder_diagnostics, 'imap_id': imap_id_info}
@@ -2936,6 +3512,14 @@ def fetch_icloud_hme_folder_emails(account: Dict[str, Any], folder: str,
 
         message_ids, search_mode, search_attempts = search_imap_message_ids(mail)
         if message_ids is None:
+            app.logger.warning(
+                "[HME_FETCH_DIAG] search_failed account_id=%s hme=%s folder=%s attempts=%s elapsed=%.2fs",
+                account_id,
+                hme_address,
+                receiver_folder,
+                len(search_attempts or []),
+                time.monotonic() - started_at,
+            )
             return build_hme_imap_error(
                 'IMAP_SEARCH_FAILED',
                 'IMAP 搜索邮件失败',
@@ -2947,21 +3531,104 @@ def fetch_icloud_hme_folder_emails(account: Dict[str, Any], folder: str,
             message_ids = build_sequence_message_ids(selected_exists)
             search_mode = 'sequence'
         if not message_ids:
+            app.logger.warning(
+                "[HME_FETCH_DIAG] no_messages account_id=%s hme=%s folder=%s selected_exists=%s "
+                "search_mode=%s attempts=%s elapsed=%.2fs",
+                account_id,
+                hme_address,
+                receiver_folder,
+                selected_exists,
+                search_mode or '',
+                len(search_attempts or []),
+                time.monotonic() - started_at,
+            )
             return {'success': True, 'emails': [], 'method': 'IMAP (HME)', 'has_more': False, 'request_method': 'imap'}
 
         emails_data = []
+        scanned_count = 0
+        fetch_failed_count = 0
+        empty_raw_count = 0
+        ownership_miss_count = 0
+        parse_error_count = 0
+        ownership_miss_samples = []
+        scan_timed_out = False
+        stopped_after_enough_matches = False
+        scan_timeout_seconds = get_hme_folder_scan_timeout_seconds()
+        target_match_count = skip + top
+
+        def has_scan_timed_out() -> bool:
+            return time.monotonic() - started_at >= scan_timeout_seconds
+
+        def log_scan_timeout_stop() -> None:
+            app.logger.warning(
+                "[HME_FETCH_DIAG] scan_stop_timeout account_id=%s hme=%s folder=%s scanned=%s/%s "
+                "matched=%s timeout=%ss elapsed=%.2fs",
+                account_id,
+                hme_address,
+                receiver_folder,
+                scanned_count,
+                len(message_ids),
+                len(emails_data),
+                scan_timeout_seconds,
+                time.monotonic() - started_at,
+            )
+
+        app.logger.warning(
+            "[HME_FETCH_DIAG] scan_start account_id=%s hme=%s folder=%s selected_exists=%s "
+            "message_ids=%s search_mode=%s attempts=%s scan_timeout=%ss elapsed=%.2fs",
+            account_id,
+            hme_address,
+            receiver_folder,
+            selected_exists,
+            len(message_ids),
+            search_mode or '',
+            len(search_attempts or []),
+            scan_timeout_seconds,
+            time.monotonic() - started_at,
+        )
         for uid in reversed(message_ids):
+            if has_scan_timed_out():
+                scan_timed_out = True
+                log_scan_timeout_stop()
+                break
             try:
+                scanned_count += 1
+                if scanned_count == 1 or scanned_count % 25 == 0:
+                    app.logger.warning(
+                        "[HME_FETCH_DIAG] scan_progress account_id=%s hme=%s folder=%s scanned=%s/%s matched=%s "
+                        "missed=%s fetch_failed=%s elapsed=%.2fs",
+                        account_id,
+                        hme_address,
+                        receiver_folder,
+                        scanned_count,
+                        len(message_ids),
+                        len(emails_data),
+                        ownership_miss_count,
+                        fetch_failed_count,
+                        time.monotonic() - started_at,
+                    )
                 fetch_status, fetch_data, fetch_mode, _fetch_attempts = fetch_imap_message(
                     mail, uid, '(FLAGS INTERNALDATE RFC822)', preferred_mode=search_mode or 'uid'
                 )
                 if fetch_status != 'OK' or not fetch_data:
+                    fetch_failed_count += 1
                     continue
                 raw_email, fetch_response_text = parse_imap_fetch_response(fetch_data)
                 if not raw_email:
+                    empty_raw_count += 1
                     continue
                 msg = email.message_from_bytes(raw_email)
-                if not email_message_belongs_to_hme(msg, raw_email, account.get('email', '')):
+                if not email_message_belongs_to_hme(msg, raw_email, hme_address):
+                    ownership_miss_count += 1
+                    if len(ownership_miss_samples) < 5:
+                        ownership_miss_samples.append({
+                            'uid': uid.decode('utf-8', 'replace') if isinstance(uid, (bytes, bytearray)) else str(uid),
+                            'to': decode_header_value(msg.get('To', ''))[:160],
+                            'delivered_to': decode_header_value(msg.get('Delivered-To', ''))[:160],
+                            'x_original_to': decode_header_value(msg.get('X-Original-To', ''))[:160],
+                            'original_recipient': decode_header_value(msg.get('Original-Recipient', ''))[:160],
+                            'cc': decode_header_value(msg.get('Cc', ''))[:160],
+                        })
                     continue
 
                 item = parse_hme_email_message(account, folder_name, uid, raw_email)
@@ -2969,19 +3636,88 @@ def fetch_icloud_hme_folder_emails(account: Dict[str, Any], folder: str,
                 item['is_read'] = bool(re.search(r'\\Seen\b', fetch_response_text, flags=re.IGNORECASE))
                 item['date'] = extract_imap_internaldate(fetch_response_text) or item.get('date', '')
                 emails_data.append(item)
-            except Exception:
+                if len(emails_data) >= target_match_count:
+                    stopped_after_enough_matches = True
+                    app.logger.warning(
+                        "[HME_FETCH_DIAG] scan_stop_enough_matches account_id=%s hme=%s folder=%s "
+                        "scanned=%s/%s matched=%s target=%s elapsed=%.2fs",
+                        account_id,
+                        hme_address,
+                        receiver_folder,
+                        scanned_count,
+                        len(message_ids),
+                        len(emails_data),
+                        target_match_count,
+                        time.monotonic() - started_at,
+                    )
+                    break
+            except Exception as exc:
+                parse_error_count += 1
+                if parse_error_count <= 5:
+                    app.logger.warning(
+                        "[HME_FETCH_DIAG] message_parse_error account_id=%s hme=%s folder=%s uid=%s error=%s",
+                        account_id,
+                        hme_address,
+                        receiver_folder,
+                        uid.decode('utf-8', 'replace') if isinstance(uid, (bytes, bytearray)) else str(uid),
+                        sanitize_error_details(str(exc)),
+                    )
                 continue
+            if has_scan_timed_out():
+                scan_timed_out = True
+                log_scan_timeout_stop()
+                break
 
         emails_data.sort(key=lambda item: parse_email_datetime(item.get('date')) or datetime.min, reverse=True)
         sliced = emails_data[skip:skip + top]
-        return {
+        has_more = (
+            len(emails_data) > skip + len(sliced)
+            or scanned_count < len(message_ids)
+            or scan_timed_out
+            or stopped_after_enough_matches
+        )
+        app.logger.warning(
+            "[HME_FETCH_DIAG] scan_done account_id=%s hme=%s folder=%s selected_exists=%s message_ids=%s "
+            "scanned=%s matched=%s returned=%s ownership_miss=%s fetch_failed=%s empty_raw=%s parse_errors=%s "
+            "scan_timed_out=%s stopped_after_enough=%s has_more=%s miss_samples=%s elapsed=%.2fs",
+            account_id,
+            hme_address,
+            receiver_folder,
+            selected_exists,
+            len(message_ids),
+            scanned_count,
+            len(emails_data),
+            len(sliced),
+            ownership_miss_count,
+            fetch_failed_count,
+            empty_raw_count,
+            parse_error_count,
+            scan_timed_out,
+            stopped_after_enough_matches,
+            has_more,
+            ownership_miss_samples,
+            time.monotonic() - started_at,
+        )
+        result = {
             'success': True,
             'emails': sliced,
             'method': 'IMAP (HME)',
-            'has_more': len(emails_data) > skip + len(sliced),
+            'has_more': has_more,
             'request_method': 'imap',
         }
+        if scan_timed_out:
+            result['partial'] = True
+            result['scan_timed_out'] = True
+        return result
     except Exception as exc:
+        app.logger.warning(
+            "[HME_FETCH_DIAG] fatal account_id=%s hme=%s folder=%s error=%s elapsed=%.2fs",
+            account_id,
+            hme_address,
+            folder_name,
+            sanitize_error_details(str(exc)),
+            time.monotonic() - started_at,
+        )
         return build_hme_imap_error(
             'IMAP_CONNECT_FAILED',
             sanitize_error_details(str(exc)) or 'IMAP 连接失败',
@@ -2996,23 +3732,99 @@ def fetch_icloud_hme_folder_emails(account: Dict[str, Any], folder: str,
                 pass
 
 
+def fetch_icloud_hme_account_emails_legacy(account: Dict[str, Any], folder: str,
+                                           skip: int, top: int) -> Dict[str, Any]:
+    folder_name = normalize_folder_name(folder)
+    if folder_name == 'all':
+        def fetch_hme_folder_with_context(folder_job: str) -> Dict[str, Any]:
+            with app.app_context():
+                return fetch_icloud_hme_folder_emails(account, folder_job, skip, top)
+
+        merged_top = max(1, min(100, int(top or 20) * 2))
+        folder_jobs = ('inbox', 'junkemail')
+        results = {}
+        executor = ThreadPoolExecutor(max_workers=len(folder_jobs), thread_name_prefix='hme-folder-fetch')
+        future_map = {
+            folder_job: executor.submit(fetch_hme_folder_with_context, folder_job)
+            for folder_job in folder_jobs
+        }
+        try:
+            done, _not_done = wait(future_map.values(), timeout=MAIL_FETCH_OVERALL_TIMEOUT)
+            for folder_job, future in future_map.items():
+                if future in done:
+                    try:
+                        results[folder_job] = future.result()
+                    except Exception as exc:
+                        results[folder_job] = {
+                            'success': False,
+                            'error': build_error_payload(
+                                'EMAIL_FETCH_FAILED',
+                                '获取邮件失败，请检查 HME 接收源配置',
+                                type(exc).__name__,
+                                500,
+                                str(exc)
+                            )
+                        }
+                    continue
+                future.cancel()
+                results[folder_job] = {
+                    'success': False,
+                    'error': build_error_payload(
+                        'EMAIL_FETCH_TIMEOUT',
+                        '获取邮件超时，请稍后重试',
+                        'TimeoutError',
+                        504,
+                        f'folder={folder_job}, timeout={MAIL_FETCH_OVERALL_TIMEOUT}s'
+                    )
+                }
+        finally:
+            executor.shutdown(wait=False, cancel_futures=True)
+        return merge_folder_results(results, 0, merged_top)
+
+    result = fetch_icloud_hme_folder_emails(account, folder_name, skip, top)
+    if result.get('success'):
+        result['emails'] = format_email_items(result.get('emails', []), folder_name)
+    return result
+
+
 def fetch_icloud_hme_account_emails(account: Dict[str, Any], folder: str,
-                                    skip: int, top: int) -> Dict[str, Any]:
+                                    skip: int, top: int,
+                                    force_refresh: bool = False) -> Dict[str, Any]:
     folder_name = normalize_folder_name(folder)
     if folder_name not in VALID_MAIL_FOLDERS:
         return {
             'success': False,
             'error': f'folder 参数无效，支持: {", ".join(sorted(VALID_MAIL_FOLDERS))}'
         }
-    if folder_name == 'all':
-        merged_top = max(1, min(100, int(top or 20) * 2))
-        results = {
-            folder_job: fetch_icloud_hme_folder_emails(account, folder_job, skip, top)
-            for folder_job in ('inbox', 'junkemail')
-        }
-        return merge_folder_results(results, 0, merged_top)
+    source_id = normalize_hme_source_id(account)
+    source_folders = hme_source_folders_for_request(folder_name)
+    proxy_url = get_account_proxy_url(account)
+    try:
+        source_cache_count = count_icloud_hme_source_cached_messages(source_id, source_folders)
+    except RuntimeError as exc:
+        if 'application context' in str(exc):
+            return fetch_icloud_hme_account_emails_legacy(account, folder_name, skip, top)
+        raise
+    cached_result = fetch_cached_icloud_hme_source_messages(account, folder_name, skip, top)
+    cached_count = int(cached_result.get('count') or 0) if cached_result.get('success') else 0
 
-    result = fetch_icloud_hme_folder_emails(account, folder_name, skip, top)
+    if force_refresh or source_cache_count == 0 or cached_count == 0:
+        sync_result = sync_icloud_hme_source_messages(
+            source_id,
+            source_folders,
+            force=True,
+            proxy_url=proxy_url,
+        )
+        if not sync_result.get('success') and source_cache_count == 0:
+            return sync_result
+    else:
+        start_icloud_hme_source_background_sync(source_id, source_folders, proxy_url=proxy_url)
+        result = cached_result
+        if result.get('success'):
+            result['emails'] = format_email_items(result.get('emails', []), folder_name)
+        return result
+
+    result = fetch_cached_icloud_hme_source_messages(account, folder_name, skip, top)
     if result.get('success'):
         result['emails'] = format_email_items(result.get('emails', []), folder_name)
     return result
@@ -3028,6 +3840,15 @@ def fetch_icloud_hme_account_detail_response(account: Dict[str, Any], folder: st
         }
 
     folder_name = normalize_folder_name(folder)
+    try:
+        cached_detail = fetch_cached_icloud_hme_source_detail(account, folder_name, message_id, id_mode)
+    except RuntimeError as exc:
+        if 'application context' not in str(exc):
+            raise
+        cached_detail = None
+    if cached_detail:
+        return cached_detail
+
     mail = None
     try:
         source_config = get_icloud_hme_source_imap_config(account)
@@ -3126,6 +3947,23 @@ def fetch_icloud_hme_account_detail_response(account: Dict[str, Any], folder: st
 
         internal_date = extract_imap_internaldate(fetch_response_text)
         email_detail = build_email_detail_from_message(msg, str(message_id), internal_date)
+        try:
+            source_id = normalize_hme_source_id(account)
+            source_addresses = get_icloud_hme_source_addresses(source_id)
+            recipients = extract_hme_recipients_for_source(msg, raw_email, source_addresses)
+            if recipients:
+                cache_row = build_icloud_hme_source_message_row(
+                    source_id,
+                    folder_name,
+                    message_id,
+                    raw_email,
+                    fetch_response_text,
+                    fetch_mode or id_mode or 'uid',
+                )
+                upsert_icloud_hme_source_message(cache_row, recipients)
+        except RuntimeError as exc:
+            if 'application context' not in str(exc):
+                raise
         return build_retained_detail_success_response(
             account, folder_name, message_id, email_detail, method or 'imap', 'imap', fetch_mode or id_mode or 'uid'
         )
@@ -3747,7 +4585,8 @@ def fetch_account_folder_emails(account: Dict[str, Any], folder: str, skip: int,
     }
 
 
-def fetch_account_emails(account: Dict[str, Any], folder: str, skip: int, top: int) -> Dict[str, Any]:
+def fetch_account_emails(account: Dict[str, Any], folder: str, skip: int, top: int,
+                         force_refresh: bool = False) -> Dict[str, Any]:
     proxy_url = get_account_proxy_url(account)
     fallback_proxy_urls = get_account_proxy_failover_urls(account)
     folder_name = normalize_folder_name(folder)
@@ -3758,7 +4597,7 @@ def fetch_account_emails(account: Dict[str, Any], folder: str, skip: int, top: i
         }
 
     if account.get('account_type') == 'icloud_hme':
-        return fetch_icloud_hme_account_emails(account, folder_name, skip, top)
+        return fetch_icloud_hme_account_emails(account, folder_name, skip, top, force_refresh=force_refresh)
 
     if folder_name == 'all':
         merged_top = max(1, min(100, top * 2))
@@ -3843,7 +4682,8 @@ def api_get_emails(email_addr):
         return jsonify(fetch_retained_normal_mail_list(account, folder, skip, top))
     skip = parse_non_negative_int(request.args.get('skip', 0), 0)
     top = parse_non_negative_int(request.args.get('top', 20), 20, 50)
-    result = fetch_account_emails(account, folder, skip, top)
+    force_refresh = str(request.args.get('force', '') or '').strip().lower() in {'1', 'true', 'yes', 'on'}
+    result = fetch_account_emails(account, folder, skip, top, force_refresh=force_refresh)
     return jsonify(result)
 
 

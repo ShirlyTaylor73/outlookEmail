@@ -223,6 +223,33 @@ class ICloudHmeSyncTestCase(unittest.TestCase):
         self.assertEqual(row["last_sync_status"], "success")
         self.assertIsNone(row["last_sync_error"])
 
+    def test_fetch_hme_list_treats_legacy_generic_maildomain_host_as_default(self):
+        captured = {}
+
+        class ResponseStub:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self):
+                return b'{"hmeEmails":[]}'
+
+        def fake_urlopen(request_obj, timeout=0):
+            captured["url"] = request_obj.full_url
+            return ResponseStub()
+
+        with patch.object(web_outlook_app.urllib.request, "urlopen", side_effect=fake_urlopen):
+            result = web_outlook_app.fetch_icloud_hme_list(
+                "cookie=value",
+                "global",
+                "maildomain.icloud.com",
+            )
+
+        self.assertTrue(result["success"], msg=result)
+        self.assertEqual(captured["url"], "https://p68-maildomainws.icloud.com/v2/hme/list")
+
 
 if __name__ == '__main__':
     unittest.main()

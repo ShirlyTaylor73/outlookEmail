@@ -153,7 +153,10 @@ def fetch_icloud_hme_list(cookie: str, region: str = 'global',
     is_china_region = normalized_region == 'china'
     web_origin = 'https://www.icloud.com.cn' if is_china_region else 'https://www.icloud.com'
     default_host = 'p217-maildomainws.icloud.com.cn' if is_china_region else 'p68-maildomainws.icloud.com'
-    host = str(maildomain_host or '').strip() or default_host
+    raw_host = str(maildomain_host or '').strip()
+    if raw_host.lower() in {'maildomain.icloud.com', 'maildomain.icloud.com.cn'}:
+        raw_host = ''
+    host = raw_host or default_host
     endpoint = f'https://{host}/v2/hme/list'
 
     headers = {

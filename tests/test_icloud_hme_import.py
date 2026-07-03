@@ -73,6 +73,7 @@ class ICloudHmeImportTestCase(unittest.TestCase):
         primary = Path("templates/partials/index/dialogs-primary.html").read_text(encoding="utf-8")
         js_groups = Path("static/js/index/02-groups.js").read_text(encoding="utf-8")
         js_settings = Path("static/js/index/07-settings.js").read_text(encoding="utf-8")
+        management = Path("templates/partials/index/dialogs-management.html").read_text(encoding="utf-8")
 
         self.assertIn('value="icloud_hme"', primary)
         self.assertIn("/api/icloud-hme/sources", js_settings)
@@ -86,7 +87,15 @@ class ICloudHmeImportTestCase(unittest.TestCase):
         self.assertIn("syncIcloudHmeSource", js_settings)
         self.assertIn("/api/icloud-hme/sources/test-imap", js_settings)
         self.assertIn("/sync", js_settings)
+        self.assertIn('value="china"', management)
         self.assertIn("格式：HME地址 或 HME地址----备注，每行一个。接收 IMAP 配置在 iCloud HME 源中管理。", js_groups)
+
+    def test_icloud_hme_ui_does_not_force_invalid_maildomain_host_default(self):
+        js_settings = Path("static/js/index/07-settings.js").read_text(encoding="utf-8")
+        management = Path("templates/partials/index/dialogs-management.html").read_text(encoding="utf-8")
+
+        self.assertNotIn("maildomain.icloud.com", js_settings)
+        self.assertNotIn('value="cn"', management)
 
     def test_import_hme_addresses_binds_selected_source(self):
         source_id = self._create_source()

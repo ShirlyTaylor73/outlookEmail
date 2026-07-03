@@ -46,6 +46,9 @@ class AccountShareTests(unittest.TestCase):
             db = web_outlook_app.get_db()
             for table in (
                 'account_shares',
+                'icloud_hme_source_message_recipients',
+                'icloud_hme_source_messages',
+                'icloud_hme_sources',
                 'retained_normal_mail_messages',
                 'account_tags',
                 'accounts',
@@ -86,6 +89,45 @@ class AccountShareTests(unittest.TestCase):
                     'http://fallback-secret-1',
                     'http://fallback-secret-2',
                 ),
+            )
+            db.commit()
+            return cursor.lastrowid
+
+    def _create_hme_source(self):
+        with self.app.app_context():
+            db = web_outlook_app.get_db()
+            cursor = db.execute(
+                '''
+                INSERT INTO icloud_hme_sources (
+                    name, region, receiver_email, receiver_provider, receiver_imap_host,
+                    receiver_imap_port, receiver_imap_password, receiver_folder, use_ssl,
+                    cookie, maildomain_host
+                )
+                VALUES (?, 'global', ?, 'custom', ?, 993, ?, 'INBOX', 1, '', '')
+                ''',
+                (
+                    'Shared HME Source',
+                    'receiver@example.com',
+                    'imap.example.com',
+                    web_outlook_app.encrypt_data('source-password'),
+                ),
+            )
+            db.commit()
+            return cursor.lastrowid
+
+    def _create_hme_account(self, email, source_id):
+        with self.app.app_context():
+            db = web_outlook_app.get_db()
+            cursor = db.execute(
+                '''
+                INSERT INTO accounts (
+                    email, password, client_id, refresh_token, account_type, provider,
+                    imap_host, imap_port, imap_password, proxy_url, fallback_proxy_url_1,
+                    fallback_proxy_url_2, icloud_hme_source_id
+                )
+                VALUES (?, '', '', '', 'icloud_hme', 'icloud_hme', '', 993, '', '', '', '', ?)
+                ''',
+                (email, source_id),
             )
             db.commit()
             return cursor.lastrowid
@@ -270,6 +312,57 @@ class AccountShareTests(unittest.TestCase):
         self.assertFalse(first.get_json()['throttled'])
         self.assertTrue(second.get_json()['throttled'])
         self.assertEqual(first.get_json()['emails'][0]['method'], 'imap')
+
+    def test_throttled_public_hme_refresh_returns_source_cache(self):
+        source_id = self._create_hme_source()
+        account_id = self._create_hme_account('shared-hme@icloud.com', source_id)
+        token = self._create_share(account_id)['token']
+
+        with self.app.app_context():
+            db = web_outlook_app.get_db()
+            cursor = db.execute(
+                '''
+                INSERT INTO icloud_hme_source_messages (
+                    source_id, folder, provider_message_id, id_mode, subject, sender,
+                    recipients, received_at, received_at_sort, body_preview, body,
+                    body_type, list_cached, body_cached
+                )
+                VALUES (?, 'inbox', 'hme-local', 'uid', 'Cached HME',
+                        'sender@example.com', 'shared-hme@icloud.com',
+                        '2026-06-01T00:00:00Z', 1790000000,
+                        'HME preview', '<p>HME body</p>', 'html', 1, 1)
+                ''',
+                (source_id,),
+            )
+            message_row_id = cursor.lastrowid
+            db.execute(
+                '''
+                INSERT INTO icloud_hme_source_message_recipients (
+                    source_message_id, source_id, hme_address
+                )
+                VALUES (?, ?, ?)
+                ''',
+                (message_row_id, source_id, 'shared-hme@icloud.com'),
+            )
+            db.execute(
+                '''
+                UPDATE account_shares
+                SET last_refreshed_at = ?
+                WHERE token = ?
+                ''',
+                (datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%SZ'), token),
+            )
+            db.commit()
+
+        response = self.public_client.post(f'/api/shared/{token}/refresh')
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertTrue(payload['success'], msg=payload)
+        self.assertTrue(payload['throttled'])
+        self.assertEqual(payload['count'], 1)
+        self.assertEqual(payload['emails'][0]['id'], 'hme-local')
+        self.assertEqual(payload['emails'][0]['subject'], 'Cached HME')
 
     def test_failed_public_refresh_is_sanitized_and_still_throttled(self):
         account_id = self._create_account('failed-refresh@example.com')

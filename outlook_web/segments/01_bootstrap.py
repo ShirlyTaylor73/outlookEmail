@@ -1091,6 +1091,48 @@ def init_db():
         )
     ''')
 
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS icloud_hme_source_messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            source_id INTEGER NOT NULL,
+            folder TEXT NOT NULL DEFAULT 'inbox',
+            provider_message_id TEXT NOT NULL,
+            id_mode TEXT NOT NULL DEFAULT '',
+            subject TEXT DEFAULT '无主题',
+            sender TEXT DEFAULT '未知',
+            recipients TEXT DEFAULT '',
+            cc TEXT DEFAULT '',
+            received_at TEXT DEFAULT '',
+            received_at_sort REAL DEFAULT 0,
+            is_read INTEGER NOT NULL DEFAULT 0,
+            has_attachments INTEGER NOT NULL DEFAULT 0,
+            body_preview TEXT DEFAULT '',
+            body TEXT,
+            body_type TEXT DEFAULT 'text',
+            attachments_json TEXT DEFAULT '[]',
+            list_cached INTEGER NOT NULL DEFAULT 1,
+            body_cached INTEGER NOT NULL DEFAULT 0,
+            list_cached_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            body_cached_at TIMESTAMP,
+            last_synced_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (source_id) REFERENCES icloud_hme_sources (id) ON DELETE CASCADE
+        )
+    ''')
+
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS icloud_hme_source_message_recipients (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            source_message_id INTEGER NOT NULL,
+            source_id INTEGER NOT NULL,
+            hme_address TEXT NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (source_message_id) REFERENCES icloud_hme_source_messages (id) ON DELETE CASCADE,
+            FOREIGN KEY (source_id) REFERENCES icloud_hme_sources (id) ON DELETE CASCADE
+        )
+    ''')
+
     # 创建临时邮箱表
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS temp_emails (
@@ -1909,6 +1951,31 @@ def init_db():
     cursor.execute('''
         CREATE INDEX IF NOT EXISTS idx_accounts_icloud_hme_source_id
         ON accounts(icloud_hme_source_id)
+    ''')
+
+    cursor.execute('''
+        CREATE UNIQUE INDEX IF NOT EXISTS ux_icloud_hme_source_messages_key
+        ON icloud_hme_source_messages(source_id, folder, provider_message_id, id_mode)
+    ''')
+
+    cursor.execute('''
+        CREATE INDEX IF NOT EXISTS idx_icloud_hme_source_messages_list
+        ON icloud_hme_source_messages(source_id, folder, received_at_sort DESC, id DESC)
+    ''')
+
+    cursor.execute('''
+        CREATE INDEX IF NOT EXISTS idx_icloud_hme_source_messages_body
+        ON icloud_hme_source_messages(source_id, folder, body_cached, received_at_sort DESC)
+    ''')
+
+    cursor.execute('''
+        CREATE UNIQUE INDEX IF NOT EXISTS ux_icloud_hme_source_message_recipients
+        ON icloud_hme_source_message_recipients(source_message_id, hme_address)
+    ''')
+
+    cursor.execute('''
+        CREATE INDEX IF NOT EXISTS idx_icloud_hme_source_message_recipients_lookup
+        ON icloud_hme_source_message_recipients(source_id, hme_address, source_message_id)
     ''')
 
     cursor.execute('''

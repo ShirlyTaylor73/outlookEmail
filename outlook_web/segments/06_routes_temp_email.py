@@ -1072,6 +1072,12 @@ def refresh_shared_account_messages(share: Dict[str, Any], account: Dict[str, An
         return {'success': False, 'error': '刷新邮件失败'}
 
 
+def fetch_shared_account_cached_messages(account: Dict[str, Any], limit: int = 100) -> Dict[str, Any]:
+    if account.get('account_type') == 'icloud_hme' or account.get('provider') == 'icloud_hme':
+        return fetch_cached_icloud_hme_source_messages(account, 'all', 0, limit)
+    return fetch_retained_normal_mail_list(account, 'all', 0, limit)
+
+
 def fetch_shared_account_message_detail(account: Dict[str, Any], message_id: str,
                                         folder: str, method: str, id_mode: str) -> Optional[Dict[str, Any]]:
     folder_name = normalize_folder_name(folder)
@@ -1368,17 +1374,9 @@ def api_shared_temp_email_messages(token):
 
     if share_type == 'account':
         if resource.get('account_type') == 'icloud_hme':
-            result = refresh_shared_account_messages(share, resource)
-            return jsonify({
-                'success': bool(result.get('success')),
-                'share_type': 'account',
-                'emails': result.get('emails', []) if result.get('success') else [],
-                'count': result.get('count', 0) if result.get('success') else 0,
-                'has_more': False,
-                'method': result.get('method', ''),
-                **({'error': result.get('error')} if not result.get('success') else {}),
-            })
-        result = fetch_retained_normal_mail_list(resource, 'all', 0, 100)
+            result = fetch_shared_account_cached_messages(resource, 100)
+        else:
+            result = fetch_retained_normal_mail_list(resource, 'all', 0, 100)
         emails = format_account_message_list(result.get('emails', []), result) if result.get('success') else []
         return jsonify({
             'success': True,
@@ -1438,7 +1436,7 @@ def api_refresh_shared_temp_email_messages(token):
     last_refreshed_at = parse_sqlite_timestamp(share.get('last_refreshed_at'))
     if last_refreshed_at and (now - last_refreshed_at).total_seconds() < SHARED_TEMP_EMAIL_REFRESH_THROTTLE_SECONDS:
         if share_type == 'account':
-            result = fetch_retained_normal_mail_list(resource, 'all', 0, 100)
+            result = fetch_shared_account_cached_messages(resource, 100)
             formatted = format_account_message_list(result.get('emails', []), result) if result.get('success') else []
         else:
             messages = get_temp_email_messages(resource.get('email', ''))

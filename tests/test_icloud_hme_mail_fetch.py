@@ -2,6 +2,7 @@ import importlib
 import os
 import sys
 import tempfile
+import time
 import unittest
 from email.message import EmailMessage
 from unittest.mock import Mock, patch
@@ -76,6 +77,21 @@ class FakeHmeMail:
     def logout(self):
         self.logged_out = True
         return 'BYE', [b'logout']
+
+
+class SlowFetchHmeMail(FakeHmeMail):
+    def __init__(self, messages, *, fetch_delay=0.0):
+        super().__init__(messages)
+        self.fetch_delay = fetch_delay
+        self.fetched_uids = []
+
+    def uid(self, command, *args):
+        if command == 'FETCH':
+            uid = args[0].decode('ascii') if isinstance(args[0], bytes) else str(args[0])
+            self.fetched_uids.append(uid)
+            if self.fetch_delay:
+                time.sleep(self.fetch_delay)
+        return super().uid(command, *args)
 
 
 class IcloudHmeMailFetchTests(unittest.TestCase):
@@ -241,6 +257,165 @@ class IcloudHmeMailFetchTests(unittest.TestCase):
         self.assertEqual([item['id'] for item in result['emails']], ['101'])
         self.assertEqual(plain_calls, [('imap.example.com', 993, web_outlook_app.IMAP_TIMEOUT)])
 
+    def test_hme_all_folder_fetch_uses_overall_timeout(self):
+        def fake_fetch_folder(_account, folder, _skip, _top):
+            if folder == 'inbox':
+                time.sleep(0.25)
+                return {'success': True, 'emails': [], 'method': 'IMAP (HME)', 'has_more': False}
+            return {
+                'success': True,
+                'emails': [{
+                    'id': '201',
+                    'subject': 'Junk hit',
+                    'date': '2026-04-14T08:20:50+00:00',
+                    'folder': folder,
+                }],
+                'method': 'IMAP (HME)',
+                'has_more': False,
+                'request_method': 'imap',
+            }
+
+        with patch.object(web_outlook_app, 'MAIL_FETCH_OVERALL_TIMEOUT', 0.05), \
+             patch.object(web_outlook_app, 'fetch_icloud_hme_folder_emails', side_effect=fake_fetch_folder):
+            started = time.monotonic()
+            result = web_outlook_app.fetch_icloud_hme_account_emails(self.account, 'all', 0, 20)
+            elapsed = time.monotonic() - started
+
+        self.assertLess(elapsed, 0.2)
+        self.assertTrue(result['success'], msg=result)
+        self.assertTrue(result.get('partial'), msg=result)
+        self.assertEqual([item['id'] for item in result['emails']], ['201'])
+        inbox_error = result['folder_summaries']['inbox']['error']
+        self.assertEqual(inbox_error['code'], 'EMAIL_FETCH_TIMEOUT')
+
+    def test_hme_all_folder_workers_have_flask_app_context(self):
+        def fake_fetch_folder(_account, folder, _skip, _top):
+            web_outlook_app.get_db()
+            return {
+                'success': True,
+                'emails': [{
+                    'id': folder,
+                    'subject': f'{folder} hit',
+                    'date': '2026-04-14T08:20:50+00:00',
+                    'folder': folder,
+                }],
+                'method': 'IMAP (HME)',
+                'has_more': False,
+                'request_method': 'imap',
+            }
+
+        with patch.object(web_outlook_app, 'fetch_icloud_hme_folder_emails', side_effect=fake_fetch_folder):
+            result = web_outlook_app.fetch_icloud_hme_account_emails(self.account, 'all', 0, 20)
+
+        self.assertTrue(result['success'], msg=result)
+        self.assertEqual([item['id'] for item in result['emails']], ['inbox', 'junkemail'])
+
+    def test_hme_folder_returns_partial_matches_before_scan_timeout(self):
+        messages = {
+            str(uid): make_raw_message(
+                f'Match {uid}',
+                extra_headers={'Delivered-To': 'abc@icloud.com'},
+            )
+            for uid in range(1, 80)
+        }
+        fake_mail = SlowFetchHmeMail(messages, fetch_delay=0.01)
+
+        with patch.object(web_outlook_app, 'get_icloud_hme_source_imap_config', return_value=self.source_config), \
+             patch.object(web_outlook_app, 'create_imap_connection', return_value=fake_mail), \
+             patch.object(web_outlook_app, 'get_hme_folder_scan_timeout_seconds', return_value=0.06):
+            started = time.monotonic()
+            result = web_outlook_app.fetch_icloud_hme_folder_emails(self.account, 'inbox', 0, 20)
+            elapsed = time.monotonic() - started
+
+        self.assertLess(elapsed, 0.3)
+        self.assertTrue(result['success'], msg=result)
+        self.assertTrue(result.get('partial'), msg=result)
+        self.assertTrue(result.get('scan_timed_out'), msg=result)
+        self.assertGreater(len(result['emails']), 0)
+        self.assertLess(len(fake_mail.fetched_uids), len(messages))
+
+    def test_hme_folder_timeout_is_checked_after_non_matching_messages(self):
+        messages = {
+            str(uid): make_raw_message(
+                f'Message {uid}',
+                extra_headers={'Delivered-To': 'abc@icloud.com'} if uid == 80 else None,
+            )
+            for uid in range(1, 81)
+        }
+        fake_mail = SlowFetchHmeMail(messages, fetch_delay=0.01)
+
+        with patch.object(web_outlook_app, 'get_icloud_hme_source_imap_config', return_value=self.source_config), \
+             patch.object(web_outlook_app, 'create_imap_connection', return_value=fake_mail), \
+             patch.object(web_outlook_app, 'get_hme_folder_scan_timeout_seconds', return_value=0.06):
+            started = time.monotonic()
+            result = web_outlook_app.fetch_icloud_hme_folder_emails(self.account, 'inbox', 0, 20)
+            elapsed = time.monotonic() - started
+
+        self.assertLess(elapsed, 0.3)
+        self.assertTrue(result['success'], msg=result)
+        self.assertTrue(result.get('partial'), msg=result)
+        self.assertEqual([item['subject'] for item in result['emails']], ['Message 80'])
+        self.assertLess(len(fake_mail.fetched_uids), len(messages))
+
+    def test_hme_source_cache_is_shared_by_accounts_on_same_source(self):
+        with HmeSourceCacheContext(self.app) as ctx:
+            abc_account = ctx.create_hme_account('abc@icloud.com')
+            other_account = ctx.create_hme_account('other@icloud.com')
+            fake_mail = FakeHmeMail({
+                '101': make_raw_message(
+                    'ABC message',
+                    extra_headers={'Delivered-To': 'abc@icloud.com'},
+                ),
+                '102': make_raw_message(
+                    'Other message',
+                    extra_headers={'Delivered-To': 'other@icloud.com'},
+                ),
+            })
+
+            with patch.object(web_outlook_app, 'create_imap_connection', return_value=fake_mail):
+                abc_result = web_outlook_app.fetch_account_emails(abc_account, 'inbox', 0, 20)
+
+            with patch.object(
+                web_outlook_app,
+                'create_imap_connection',
+                Mock(side_effect=AssertionError('same source should use local HME cache')),
+            ):
+                other_result = web_outlook_app.fetch_account_emails(other_account, 'inbox', 0, 20)
+
+        self.assertTrue(abc_result['success'], msg=abc_result)
+        self.assertEqual([item['subject'] for item in abc_result['emails']], ['ABC message'])
+        self.assertTrue(other_result['success'], msg=other_result)
+        self.assertEqual([item['subject'] for item in other_result['emails']], ['Other message'])
+        self.assertEqual(len(fake_mail.login_calls), 1)
+
+    def test_hme_cached_detail_is_returned_without_imap_refetch(self):
+        with HmeSourceCacheContext(self.app) as ctx:
+            account = ctx.create_hme_account('abc@icloud.com')
+            fake_mail = FakeHmeMail({
+                '101': make_raw_message(
+                    'Cached detail',
+                    extra_headers={'Delivered-To': 'abc@icloud.com'},
+                    body='cached body text',
+                ),
+            })
+
+            with patch.object(web_outlook_app, 'create_imap_connection', return_value=fake_mail):
+                list_result = web_outlook_app.fetch_account_emails(account, 'inbox', 0, 20)
+
+            with patch.object(
+                web_outlook_app,
+                'create_imap_connection',
+                Mock(side_effect=AssertionError('cached detail should not refetch IMAP')),
+            ):
+                detail_result = web_outlook_app.fetch_icloud_hme_account_detail_response(
+                    account, 'inbox', '101', 'imap', 'uid'
+                )
+
+        self.assertTrue(list_result['success'], msg=list_result)
+        self.assertTrue(detail_result['success'], msg=detail_result)
+        self.assertEqual(detail_result['email']['subject'], 'Cached detail')
+        self.assertIn('cached body text', detail_result['email']['body'])
+
     def app_context_with_hme_source(self, *, use_ssl):
         return HmeSourceContext(self.app, use_ssl=use_ssl)
 
@@ -279,6 +454,72 @@ class HmeSourceContext:
         db.commit()
         self.source_id = cursor.lastrowid
         return self.source_id
+
+    def __exit__(self, exc_type, exc, tb):
+        return self.context.__exit__(exc_type, exc, tb)
+
+
+class HmeSourceCacheContext:
+    def __init__(self, app):
+        self.app = app
+        self.context = None
+        self.source_id = None
+
+    def __enter__(self):
+        self.context = self.app.app_context()
+        self.context.__enter__()
+        web_outlook_app.init_db()
+        db = web_outlook_app.get_db()
+        for table in (
+            'icloud_hme_source_message_recipients',
+            'icloud_hme_source_messages',
+            'accounts',
+            'icloud_hme_sources',
+        ):
+            db.execute(f'DELETE FROM {table}')
+        cursor = db.execute(
+            '''
+            INSERT INTO icloud_hme_sources (
+                name, region, receiver_email, receiver_provider, receiver_imap_host,
+                receiver_imap_port, receiver_imap_password, receiver_folder, use_ssl,
+                cookie, maildomain_host
+            )
+            VALUES (?, 'global', ?, 'custom', ?, 993, ?, 'INBOX', 1, '', '')
+            ''',
+            (
+                'Shared Gmail Source',
+                'receiver@example.com',
+                'imap.example.com',
+                web_outlook_app.encrypt_data('source-password'),
+            ),
+        )
+        self.source_id = cursor.lastrowid
+        db.commit()
+        return self
+
+    def create_hme_account(self, email_addr):
+        db = web_outlook_app.get_db()
+        cursor = db.execute(
+            '''
+            INSERT INTO accounts (
+                email, client_id, refresh_token, password, group_id, remark, status,
+                account_type, provider, imap_host, imap_port, imap_password,
+                proxy_url, icloud_hme_source_id
+            )
+            VALUES (?, '', '', '', 1, '', 'active', 'icloud_hme',
+                    'icloud_hme', '', 993, '', '', ?)
+            ''',
+            (email_addr, self.source_id),
+        )
+        db.commit()
+        return {
+            'id': cursor.lastrowid,
+            'email': email_addr,
+            'account_type': 'icloud_hme',
+            'provider': 'icloud_hme',
+            'icloud_hme_source_id': self.source_id,
+            'proxy_url': '',
+        }
 
     def __exit__(self, exc_type, exc, tb):
         return self.context.__exit__(exc_type, exc, tb)
