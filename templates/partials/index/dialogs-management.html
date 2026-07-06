@@ -678,8 +678,8 @@
                                     <p>查看 HME 地址导入状态、所属分组和当前启用情况。</p>
                                 </div>
                                 <div class="settings-action-row">
-                                    <button class="btn btn-sm btn-secondary" type="button">刷新地址</button>
-                                    <button class="btn btn-sm btn-primary" type="button">导入已选</button>
+                                    <button class="btn btn-sm btn-secondary" type="button" id="icloudHmeRefreshAddressesBtn" data-action="refresh-hme-addresses">刷新地址</button>
+                                    <button class="btn btn-sm btn-primary" type="button" id="icloudHmeImportSelectedAddressesBtn" data-action="import-selected-hme-addresses">导入已选</button>
                                 </div>
                             </div>
                             <div class="hme-settings-summary-grid" id="icloudHmeSummaryCards">
@@ -762,22 +762,34 @@
                             <form id="icloudHmeLongRunnerForm" onsubmit="event.preventDefault()">
                                 <div class="settings-panel-grid">
                                     <div class="form-group">
-                                        <label class="form-label">执行窗口</label>
-                                        <input type="text" class="form-input" placeholder="例如 22:00-08:00">
+                                        <label class="form-label" for="icloudHmeLongRunnerLabelPrefix">Label 前缀</label>
+                                        <input type="text" class="form-input" id="icloudHmeLongRunnerLabelPrefix" value="OutlookEmail" placeholder="OutlookEmail">
                                     </div>
                                     <div class="form-group">
-                                        <label class="form-label">单轮数量</label>
-                                        <input type="number" class="form-input" min="1" step="1" placeholder="例如 20">
+                                        <label class="form-label" for="icloudHmeLongRunnerTargetCount">注册数量</label>
+                                        <input type="number" class="form-input" id="icloudHmeLongRunnerTargetCount" min="1" step="1" value="1" placeholder="例如 20">
+                                    </div>
+                                    <div class="form-group">
+                                        <label class="form-label" for="icloudHmeLongRunnerSuccessDelaySeconds">成功延迟秒</label>
+                                        <input type="number" class="form-input" id="icloudHmeLongRunnerSuccessDelaySeconds" min="0" step="1" value="780" placeholder="780">
+                                    </div>
+                                    <div class="form-group">
+                                        <label class="form-label" for="icloudHmeLongRunnerFailureDelaySeconds">失败延迟秒</label>
+                                        <input type="number" class="form-input" id="icloudHmeLongRunnerFailureDelaySeconds" min="0" step="1" value="3900" placeholder="3900">
+                                    </div>
+                                    <div class="form-group">
+                                        <label class="form-label" for="icloudHmeLongRunnerRunWindow">执行窗口</label>
+                                        <input type="text" class="form-input" id="icloudHmeLongRunnerRunWindow" placeholder="例如 22:00-08:00">
                                     </div>
                                     <div class="form-group settings-form-span-full">
-                                        <label class="form-label">备注</label>
-                                        <textarea class="form-textarea" placeholder="记录本次任务的目标分组、账号来源或限制条件"></textarea>
+                                        <label class="form-label" for="icloudHmeLongRunnerNote">备注</label>
+                                        <textarea class="form-textarea" id="icloudHmeLongRunnerNote" placeholder="记录本次任务的目标分组、账号来源或限制条件"></textarea>
                                     </div>
                                 </div>
                                 <div class="settings-action-row">
-                                    <button class="btn btn-primary" type="button">启动任务</button>
-                                    <button class="btn btn-secondary" type="button">暂停</button>
-                                    <button class="btn btn-danger" type="button">停止</button>
+                                    <button class="btn btn-primary" type="button" id="icloudHmeLongRunnerStartBtn" data-action="start-long-runner">启动任务</button>
+                                    <button class="btn btn-secondary" type="button" id="icloudHmeLongRunnerRefreshBtn" data-action="refresh-long-runner">刷新状态</button>
+                                    <button class="btn btn-danger" type="button" id="icloudHmeLongRunnerStopBtn" data-action="stop-long-runner">中止</button>
                                 </div>
                             </form>
                             <div class="hme-long-runner-status" id="icloudHmeLongRunnerStatus">长时任务状态：尚未启动</div>
@@ -791,8 +803,8 @@
                                     <p>集中扫描停用通知候选，复核后批量删除或停用对应 HME 地址。</p>
                                 </div>
                                 <div class="settings-action-row">
-                                    <button class="btn btn-sm btn-secondary" type="button">扫描候选</button>
-                                    <button class="btn btn-sm btn-danger" type="button">批量删除</button>
+                                    <button class="btn btn-sm btn-secondary" type="button" id="icloudHmeScanCandidatesBtn" data-action="scan-hme-candidates">扫描候选</button>
+                                    <button class="btn btn-sm btn-danger" type="button" id="icloudHmeDeleteCandidatesBtn" data-action="delete-selected-hme-candidates">批量删除</button>
                                 </div>
                             </div>
                             <div class="hme-settings-table-wrap">

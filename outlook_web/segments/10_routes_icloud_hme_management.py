@@ -11,26 +11,6 @@ ICLOUD_HME_LONG_RUNNER_STOP = threading.Event()
 ICLOUD_HME_LONG_RUNNER_PAYLOADS = {}
 
 
-def ensure_icloud_hme_management_runtime_columns(db=None) -> None:
-    db = db or get_db()
-
-    address_columns = {
-        row['name']
-        for row in db.execute('PRAGMA table_info(icloud_hme_address_cache)').fetchall()
-    }
-    if 'anonymous_id' not in address_columns:
-        db.execute("ALTER TABLE icloud_hme_address_cache ADD COLUMN anonymous_id TEXT DEFAULT ''")
-
-    candidate_columns = {
-        row['name']
-        for row in db.execute('PRAGMA table_info(icloud_hme_deactivation_candidates)').fetchall()
-    }
-    if 'deleted_at' not in candidate_columns:
-        db.execute("ALTER TABLE icloud_hme_deactivation_candidates ADD COLUMN deleted_at TIMESTAMP")
-
-    db.commit()
-
-
 def normalize_bool_arg(value, default=False) -> bool:
     if value is None:
         return default
@@ -138,7 +118,6 @@ def extract_hme_item_fields(item) -> Dict[str, Any]:
 
 
 def upsert_icloud_hme_address_cache(source_id, hme_items) -> None:
-    ensure_icloud_hme_management_runtime_columns()
     db = get_db()
     rows = []
     seen = set()
@@ -180,7 +159,6 @@ def upsert_icloud_hme_address_cache(source_id, hme_items) -> None:
 
 
 def load_cached_icloud_hme_addresses(source_id) -> List[Dict[str, Any]]:
-    ensure_icloud_hme_management_runtime_columns()
     db = get_db()
     rows = db.execute(
         '''
@@ -816,7 +794,6 @@ def scan_icloud_hme_deactivation_candidates(
     limit=200,
     refresh=False,
 ):
-    ensure_icloud_hme_management_runtime_columns()
     source_id = normalize_source_id(source_id)
     source = get_icloud_hme_source_by_id(source_id, include_secret=bool(refresh))
     if not source:
@@ -909,7 +886,6 @@ def scan_icloud_hme_deactivation_candidates(
 
 
 def list_icloud_hme_deactivation_candidates(source_id, status=None, limit=200):
-    ensure_icloud_hme_management_runtime_columns()
     source_id = normalize_source_id(source_id)
     if not get_icloud_hme_source_by_id(source_id):
         raise LookupError('iCloud HME 接收源不存在')
@@ -988,7 +964,6 @@ def find_icloud_hme_anonymous_id(source_id, hme) -> str:
 
 
 def delete_icloud_hme_deactivation_candidates(source_id, candidate_ids):
-    ensure_icloud_hme_management_runtime_columns()
     source_id = normalize_source_id(source_id)
     source = get_icloud_hme_source_by_id(source_id, include_secret=True)
     if not source:

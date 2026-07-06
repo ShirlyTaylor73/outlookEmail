@@ -1021,6 +1021,29 @@ def reset_interrupted_icloud_hme_generation_tasks(conn) -> None:
     )
 
 
+def migrate_icloud_hme_management_columns(conn) -> None:
+    address_columns = {
+        row[1]
+        for row in conn.execute("PRAGMA table_info(icloud_hme_address_cache)").fetchall()
+    }
+    if address_columns and 'anonymous_id' not in address_columns:
+        conn.execute("ALTER TABLE icloud_hme_address_cache ADD COLUMN anonymous_id TEXT DEFAULT ''")
+
+    candidate_columns = {
+        row[1]
+        for row in conn.execute("PRAGMA table_info(icloud_hme_deactivation_candidates)").fetchall()
+    }
+    if candidate_columns and 'deleted_at' not in candidate_columns:
+        conn.execute('ALTER TABLE icloud_hme_deactivation_candidates ADD COLUMN deleted_at TIMESTAMP')
+
+
+def ensure_icloud_hme_management_runtime_columns(db=None) -> None:
+    """Backward-compatible shim; init_db owns the HME schema migration."""
+    conn = db or get_db()
+    migrate_icloud_hme_management_columns(conn)
+    conn.commit()
+
+
 def init_db():
     """初始化数据库"""
     conn = sqlite3.connect(DATABASE)
@@ -1155,6 +1178,7 @@ def init_db():
             label TEXT DEFAULT '',
             note TEXT DEFAULT '',
             status TEXT NOT NULL DEFAULT 'active',
+            anonymous_id TEXT DEFAULT '',
             last_seen_at TIMESTAMP,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -1226,6 +1250,7 @@ def init_db():
             status TEXT NOT NULL DEFAULT 'pending',
             detected_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             deactivated_at TIMESTAMP,
+            deleted_at TIMESTAMP,
             last_error TEXT DEFAULT '',
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -1691,6 +1716,8 @@ def init_db():
     retained_normal_mail_columns = {row[1] for row in cursor.fetchall()}
     if 'received_at_sort' not in retained_normal_mail_columns:
         cursor.execute('ALTER TABLE retained_normal_mail_messages ADD COLUMN received_at_sort REAL DEFAULT 0')
+
+    migrate_icloud_hme_management_columns(conn)
 
     cursor.execute("PRAGMA table_info(project_accounts)")
     project_account_columns = [col[1] for col in cursor.fetchall()]

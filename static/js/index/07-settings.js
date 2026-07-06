@@ -1149,19 +1149,25 @@
         }
 
         function getIcloudHmeLongRunnerPayload() {
-            const form = document.getElementById('icloudHmeLongRunnerForm');
-            const textInput = form?.querySelector('input[type="text"]');
-            const countInput = form?.querySelector('input[type="number"]');
-            const noteInput = form?.querySelector('textarea');
+            const getValue = (id) => document.getElementById(id)?.value?.trim() || '';
+            const getNumber = (id, fallback) => {
+                const value = parseInt(getValue(id), 10);
+                return Number.isFinite(value) ? value : fallback;
+            };
             const sourceId = getSelectedIcloudHmeSourceId();
             const groupSelectValue = document.getElementById('icloudHmeAddressGroupFilter')?.value || '';
             const fallbackGroupId = currentGroupId || getIcloudHmeAccountGroups()[0]?.id || '';
+            const targetCount = getNumber('icloudHmeLongRunnerTargetCount', 1);
             return {
                 source_id: sourceId,
                 target_group_id: groupSelectValue || fallbackGroupId,
-                total_requested: parseInt(countInput?.value || '1', 10) || 1,
-                note: noteInput?.value.trim() || '',
-                run_window: textInput?.value.trim() || ''
+                target_count: targetCount,
+                total_requested: targetCount,
+                label_prefix: getValue('icloudHmeLongRunnerLabelPrefix') || 'OutlookEmail',
+                note: getValue('icloudHmeLongRunnerNote'),
+                success_delay_seconds: getNumber('icloudHmeLongRunnerSuccessDelaySeconds', 780),
+                failure_delay_seconds: getNumber('icloudHmeLongRunnerFailureDelaySeconds', 3900),
+                run_window: getValue('icloudHmeLongRunnerRunWindow')
             };
         }
 
@@ -1185,13 +1191,12 @@
         function renderIcloudHmeLongRunnerStatus(status) {
             const currentStatus = status?.status || 'idle';
             const statusEl = document.getElementById('icloudHmeLongRunnerStatus');
-            const form = document.getElementById('icloudHmeLongRunnerForm');
-            const buttons = form ? Array.from(form.querySelectorAll('button')) : [];
-            const startBtn = buttons[0];
-            const stopButtons = buttons.slice(1);
+            const startBtn = document.getElementById('icloudHmeLongRunnerStartBtn');
+            const refreshBtn = document.getElementById('icloudHmeLongRunnerRefreshBtn');
+            const stopBtn = document.getElementById('icloudHmeLongRunnerStopBtn');
             const active = ['pending', 'running', 'stopping'].includes(currentStatus);
             const startDisabled = ['running', 'stopping'].includes(currentStatus);
-            const stopEnabled = currentStatus === 'running';
+            const stopEnabled = ['running', 'stopping'].includes(currentStatus);
             if (statusEl) {
                 const progress = status?.total_requested
                     ? `进度：${Number(status.success_count || 0) + Number(status.failed_count || 0)}/${status.total_requested}`
@@ -1200,9 +1205,8 @@
                 statusEl.textContent = `长时任务状态：${currentStatus}，${progress}${errorText}`;
             }
             if (startBtn) startBtn.disabled = startDisabled;
-            stopButtons.forEach(button => {
-                button.disabled = !stopEnabled;
-            });
+            if (refreshBtn) refreshBtn.disabled = false;
+            if (stopBtn) stopBtn.disabled = !stopEnabled;
             document.querySelector('#settingsIcloudHmeSection .hme-status-pill')?.replaceChildren(document.createTextNode(active ? currentStatus : '空闲'));
         }
 
@@ -1423,10 +1427,13 @@
             const section = document.getElementById('settingsIcloudHmeSection');
             if (!section) return;
 
-            const subpanels = section.querySelectorAll('.settings-subpanel');
-            const addressButtons = subpanels[1]?.querySelectorAll('.hme-settings-drawer__head .settings-action-row .btn') || [];
-            addressButtons[0]?.addEventListener('click', () => loadIcloudHmeAddresses({ refresh: true, offset: 0 }));
-            addressButtons[1]?.addEventListener('click', () => importSelectedIcloudHmeAddresses());
+            const bindSectionAction = (id, action, handler) => {
+                const element = document.getElementById(id) || section.querySelector(`[data-action="${action}"]`);
+                element?.addEventListener('click', handler);
+            };
+
+            bindSectionAction('icloudHmeRefreshAddressesBtn', 'refresh-hme-addresses', () => loadIcloudHmeAddresses({ refresh: true, offset: 0 }));
+            bindSectionAction('icloudHmeImportSelectedAddressesBtn', 'import-selected-hme-addresses', () => importSelectedIcloudHmeAddresses());
 
             const drawer = document.getElementById('icloudHmeAddressDrawer');
             const loadDrawerOnce = () => {
@@ -1467,14 +1474,15 @@
                 }
             });
 
-            const longRunnerButtons = document.getElementById('icloudHmeLongRunnerForm')?.querySelectorAll('button') || [];
-            longRunnerButtons[0]?.addEventListener('click', () => startIcloudHmeLongRunner());
-            longRunnerButtons[1]?.addEventListener('click', () => stopIcloudHmeLongRunner());
-            longRunnerButtons[2]?.addEventListener('click', () => stopIcloudHmeLongRunner());
+            bindSectionAction('icloudHmeLongRunnerStartBtn', 'start-long-runner', () => startIcloudHmeLongRunner());
+            bindSectionAction('icloudHmeLongRunnerRefreshBtn', 'refresh-long-runner', async () => {
+                await loadIcloudHmeLongRunnerStatus();
+                await loadIcloudHmeLongRunnerLogs();
+            });
+            bindSectionAction('icloudHmeLongRunnerStopBtn', 'stop-long-runner', () => stopIcloudHmeLongRunner());
 
-            const candidateButtons = subpanels[3]?.querySelectorAll('.hme-settings-drawer__head .settings-action-row .btn') || [];
-            candidateButtons[0]?.addEventListener('click', () => scanIcloudHmeDeactivationCandidates());
-            candidateButtons[1]?.addEventListener('click', () => deleteSelectedIcloudHmeCandidates());
+            bindSectionAction('icloudHmeScanCandidatesBtn', 'scan-hme-candidates', () => scanIcloudHmeDeactivationCandidates());
+            bindSectionAction('icloudHmeDeleteCandidatesBtn', 'delete-selected-hme-candidates', () => deleteSelectedIcloudHmeCandidates());
             const candidateBody = document.getElementById('icloudHmeDeactivationCandidateTableBody');
             candidateBody?.addEventListener('click', event => {
                 const actionEl = event.target.closest?.('[data-action="delete-candidate"]');

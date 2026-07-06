@@ -43,6 +43,21 @@ def test_icloud_hme_management_tables_exist(client):
     assert "icloud_hme_deactivation_candidates" in table_names
 
 
+def test_icloud_hme_management_tables_include_runtime_columns(client):
+    db = app_module.get_db()
+    address_columns = {
+        row["name"]
+        for row in db.execute("PRAGMA table_info(icloud_hme_address_cache)").fetchall()
+    }
+    candidate_columns = {
+        row["name"]
+        for row in db.execute("PRAGMA table_info(icloud_hme_deactivation_candidates)").fetchall()
+    }
+
+    assert "anonymous_id" in address_columns
+    assert "deleted_at" in candidate_columns
+
+
 def test_reset_interrupted_icloud_hme_generation_tasks_marks_incomplete_tasks_stopped(client):
     db = app_module.get_db()
     db.executemany(
