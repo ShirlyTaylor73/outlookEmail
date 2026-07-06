@@ -138,7 +138,7 @@
                                 <label class="form-label">iCloud HME 源</label>
                                 <div class="hme-source-picker">
                                     <select class="form-select" id="importIcloudHmeSourceSelect"></select>
-                                    <button class="btn btn-secondary" type="button" onclick="openIcloudHmeSourceModal()">管理 HME 源</button>
+                                    <button class="btn btn-secondary" type="button" onclick="hideAddAccountModal(); Promise.resolve(showSettingsModal()).then(() => setTimeout(() => scrollSettingsSection('settingsIcloudHmeSection'), 80))">打开 HME 设置</button>
                                 </div>
                                 <div class="form-hint">接收 IMAP、Cookie 与同步设置在 HME 源中统一管理。</div>
                             </div>
@@ -256,7 +256,7 @@
                     <label class="form-label">iCloud HME 源</label>
                     <div class="hme-source-picker">
                         <select class="form-select" id="editIcloudHmeSourceSelect"></select>
-                        <button class="btn btn-secondary" type="button" onclick="openIcloudHmeSourceModal()">管理 HME 源</button>
+                        <button class="btn btn-secondary" type="button" onclick="hideEditAccountModal(); Promise.resolve(showSettingsModal()).then(() => setTimeout(() => scrollSettingsSection('settingsIcloudHmeSection'), 80))">打开 HME 设置</button>
                     </div>
                     <div class="form-hint">HME 账号共用所选源的接收 IMAP 配置。</div>
                 </div>

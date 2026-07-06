@@ -54,6 +54,12 @@
                                     </button>
                                 </li>
                                 <li>
+                                    <button type="button" class="settings-sidebar-link" data-target="settingsIcloudHmeSection" onclick="scrollSettingsSection('settingsIcloudHmeSection', this)">
+                                        <strong>iCloud HME</strong>
+                                        <span>Cookie、接收源、地址导入与批量停用</span>
+                                    </button>
+                                </li>
+                                <li>
                                     <button type="button" class="settings-sidebar-link" data-target="settingsCloudflareSection" onclick="scrollSettingsSection('settingsCloudflareSection', this)">
                                         <strong>Cloudflare 临时邮箱</strong>
                                         <span>Worker 域名、邮箱域名列表和管理员密码</span>
@@ -569,6 +575,248 @@
                     </div>
                 </section>
 
+                <section class="settings-section" id="settingsIcloudHmeSection">
+                    <div class="settings-section-head">
+                        <span class="settings-section-kicker">iCloud HME</span>
+                        <h4>iCloud Hide My Email 设置</h4>
+                        <p>统一管理 HME 接收源、地址同步、长时注册任务和 OpenAI Access Deactivated 扫描。</p>
+                    </div>
+                    <div class="settings-panel settings-panel-stack">
+                        <section class="settings-subpanel">
+                            <div class="hme-settings-drawer__head">
+                                <div>
+                                    <h5 id="icloudHmeSourceModalTitle">新建 iCloud HME 源</h5>
+                                    <p>维护 iCloud Cookie、接收 IMAP 与 Maildomain Host；保存后可在导入/编辑账号中选择该源。</p>
+                                </div>
+                                <button class="btn btn-sm btn-secondary" type="button" onclick="resetIcloudHmeSourceForm()">新建源</button>
+                            </div>
+                            <div class="hme-source-layout">
+                                <aside class="hme-source-list-panel">
+                                    <div class="hme-source-list-head">
+                                        <div>
+                                            <strong>HME 源</strong>
+                                            <p>接收邮箱、IMAP 与同步入口</p>
+                                        </div>
+                                        <button class="btn btn-sm btn-secondary" type="button" onclick="loadIcloudHmeSources()">刷新</button>
+                                    </div>
+                                    <div class="hme-source-list" id="icloudHmeSourceList">
+                                        <div class="hme-source-empty">加载中...</div>
+                                    </div>
+                                </aside>
+                                <div class="hme-source-form-panel">
+                                    <input type="hidden" id="icloudHmeSourceId">
+                                    <div class="settings-panel-grid">
+                                        <div class="form-group">
+                                            <label class="form-label">源名称</label>
+                                            <input type="text" class="form-input" id="icloudHmeSourceName" placeholder="主接收邮箱">
+                                        </div>
+                                        <div class="form-group">
+                                            <label class="form-label">区域</label>
+                                            <select class="form-select" id="icloudHmeSourceRegion">
+                                                <option value="global">Global</option>
+                                                <option value="china">China</option>
+                                            </select>
+                                        </div>
+                                        <div class="form-group">
+                                            <label class="form-label">接收邮箱</label>
+                                            <input type="email" class="form-input" id="icloudHmeReceiverEmail" placeholder="receiver@example.com">
+                                        </div>
+                                        <div class="form-group">
+                                            <label class="form-label">接收邮箱类型</label>
+                                            <select class="form-select" id="icloudHmeReceiverProvider">
+                                                <option value="custom">自定义 IMAP</option>
+                                                <option value="icloud">iCloud</option>
+                                                <option value="gmail">Gmail</option>
+                                                <option value="outlook">Outlook</option>
+                                            </select>
+                                        </div>
+                                        <div class="form-group">
+                                            <label class="form-label">IMAP 服务器</label>
+                                            <input type="text" class="form-input" id="icloudHmeReceiverImapHost" placeholder="imap.example.com">
+                                        </div>
+                                        <div class="form-group">
+                                            <label class="form-label">IMAP 端口</label>
+                                            <input type="number" class="form-input" id="icloudHmeReceiverImapPort" value="993" min="1" max="65535">
+                                        </div>
+                                        <div class="form-group">
+                                            <label class="form-label">IMAP 密码 / 授权码</label>
+                                            <input type="password" class="form-input" id="icloudHmeReceiverImapPassword" autocomplete="new-password">
+                                        </div>
+                                        <div class="form-group">
+                                            <label class="form-label">接收文件夹</label>
+                                            <input type="text" class="form-input" id="icloudHmeReceiverFolder" value="INBOX">
+                                        </div>
+                                        <div class="form-group">
+                                            <label class="settings-toggle settings-toggle--card">
+                                                <input type="checkbox" id="icloudHmeUseSsl" checked>
+                                                <span class="form-label">使用 SSL 连接 IMAP</span>
+                                            </label>
+                                        </div>
+                                        <div class="form-group">
+                                            <label class="form-label">Maildomain Host</label>
+                                            <input type="text" class="form-input" id="icloudHmeMaildomainHost" placeholder="留空自动选择，例如 p68-maildomainws.icloud.com">
+                                        </div>
+                                        <div class="form-group settings-form-span-full">
+                                            <label class="form-label">iCloud Cookie</label>
+                                            <textarea class="form-textarea hme-source-secret" id="icloudHmeCookie" placeholder="用于同步 Hide My Email 地址"></textarea>
+                                        </div>
+                                    </div>
+                                    <div class="settings-action-row hme-source-actions">
+                                        <button class="btn btn-secondary" type="button" onclick="testIcloudHmeSourceImap()">测试 IMAP</button>
+                                        <button class="btn btn-secondary" type="button" id="icloudHmeSourceSyncBtn" onclick="syncIcloudHmeSource()">同步 HME</button>
+                                        <button class="btn btn-danger" type="button" id="icloudHmeSourceDeleteBtn" onclick="deleteIcloudHmeSource()">删除源</button>
+                                        <button class="btn btn-primary" type="button" onclick="saveIcloudHmeSource()">保存源</button>
+                                    </div>
+                                </div>
+                            </div>
+                        </section>
+
+                        <section class="settings-subpanel">
+                            <div class="hme-settings-drawer__head">
+                                <div>
+                                    <h5>使用中地址与导入状态抽屉</h5>
+                                    <p>查看 HME 地址导入状态、所属分组和当前启用情况。</p>
+                                </div>
+                                <div class="settings-action-row">
+                                    <button class="btn btn-sm btn-secondary" type="button">刷新地址</button>
+                                    <button class="btn btn-sm btn-primary" type="button">导入已选</button>
+                                </div>
+                            </div>
+                            <div class="hme-settings-summary-grid" id="icloudHmeSummaryCards">
+                                <article class="hme-settings-summary-card">
+                                    <span>使用中地址</span>
+                                    <strong>--</strong>
+                                    <small>等待地址同步</small>
+                                </article>
+                                <article class="hme-settings-summary-card">
+                                    <span>已导入账号</span>
+                                    <strong>--</strong>
+                                    <small>按当前分组统计</small>
+                                </article>
+                                <article class="hme-settings-summary-card">
+                                    <span>待处理</span>
+                                    <strong>--</strong>
+                                    <small>未导入或需复核</small>
+                                </article>
+                            </div>
+                            <div class="hme-settings-drawer" id="icloudHmeAddressDrawer">
+                                <div class="hme-settings-filter-grid">
+                                    <div class="form-group">
+                                        <label class="form-label">搜索地址</label>
+                                        <input type="search" class="form-input" id="icloudHmeAddressSearchInput" placeholder="按 HME 地址、标签或备注搜索">
+                                    </div>
+                                    <div class="form-group">
+                                        <label class="form-label">启用状态</label>
+                                        <select class="form-select" id="icloudHmeAddressActiveFilter">
+                                            <option value="">全部</option>
+                                            <option value="active">启用</option>
+                                            <option value="inactive">停用</option>
+                                        </select>
+                                    </div>
+                                    <div class="form-group">
+                                        <label class="form-label">导入状态</label>
+                                        <select class="form-select" id="icloudHmeAddressImportStateFilter">
+                                            <option value="">全部</option>
+                                            <option value="imported">已导入</option>
+                                            <option value="pending">未导入</option>
+                                            <option value="failed">导入失败</option>
+                                        </select>
+                                    </div>
+                                    <div class="form-group">
+                                        <label class="form-label">目标分组</label>
+                                        <select class="form-select" id="icloudHmeAddressGroupFilter">
+                                            <option value="">全部分组</option>
+                                        </select>
+                                    </div>
+                                </div>
+                                <div class="hme-settings-table-wrap">
+                                    <table class="data-table">
+                                        <thead>
+                                            <tr>
+                                                <th>地址</th>
+                                                <th>状态</th>
+                                                <th>导入</th>
+                                                <th>分组</th>
+                                                <th>最近同步</th>
+                                                <th>操作</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody id="icloudHmeAddressTableBody">
+                                            <tr>
+                                                <td colspan="6">等待加载 HME 地址...</td>
+                                            </tr>
+                                        </tbody>
+                                    </table>
+                                </div>
+                            </div>
+                        </section>
+
+                        <section class="settings-subpanel">
+                            <div class="hme-settings-drawer__head">
+                                <div>
+                                    <h5>长时定时注册任务</h5>
+                                    <p>配置长时运行的注册任务参数，状态与日志保留在本页抽屉中查看。</p>
+                                </div>
+                                <span class="hme-status-pill">空闲</span>
+                            </div>
+                            <form id="icloudHmeLongRunnerForm" onsubmit="event.preventDefault()">
+                                <div class="settings-panel-grid">
+                                    <div class="form-group">
+                                        <label class="form-label">执行窗口</label>
+                                        <input type="text" class="form-input" placeholder="例如 22:00-08:00">
+                                    </div>
+                                    <div class="form-group">
+                                        <label class="form-label">单轮数量</label>
+                                        <input type="number" class="form-input" min="1" step="1" placeholder="例如 20">
+                                    </div>
+                                    <div class="form-group settings-form-span-full">
+                                        <label class="form-label">备注</label>
+                                        <textarea class="form-textarea" placeholder="记录本次任务的目标分组、账号来源或限制条件"></textarea>
+                                    </div>
+                                </div>
+                                <div class="settings-action-row">
+                                    <button class="btn btn-primary" type="button">启动任务</button>
+                                    <button class="btn btn-secondary" type="button">暂停</button>
+                                    <button class="btn btn-danger" type="button">停止</button>
+                                </div>
+                            </form>
+                            <div class="hme-long-runner-status" id="icloudHmeLongRunnerStatus">长时任务状态：尚未启动</div>
+                            <pre class="hme-long-runner-log" id="icloudHmeLongRunnerLogs">暂无运行日志</pre>
+                        </section>
+
+                        <section class="settings-subpanel">
+                            <div class="hme-settings-drawer__head">
+                                <div>
+                                    <h5>OpenAI Access Deactivated 扫描与批量删除</h5>
+                                    <p>集中扫描停用通知候选，复核后批量删除或停用对应 HME 地址。</p>
+                                </div>
+                                <div class="settings-action-row">
+                                    <button class="btn btn-sm btn-secondary" type="button">扫描候选</button>
+                                    <button class="btn btn-sm btn-danger" type="button">批量删除</button>
+                                </div>
+                            </div>
+                            <div class="hme-settings-table-wrap">
+                                <table class="data-table">
+                                    <thead>
+                                        <tr>
+                                            <th>HME 地址</th>
+                                            <th>最近通知</th>
+                                            <th>匹配原因</th>
+                                            <th>状态</th>
+                                            <th>操作</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody id="icloudHmeDeactivationCandidateTableBody">
+                                        <tr>
+                                            <td colspan="5">暂无 Access Deactivated 候选。</td>
+                                        </tr>
+                                    </tbody>
+                                </table>
+                            </div>
+                        </section>
+                    </div>
+                </section>
+
                 <section class="settings-section" id="settingsCloudflareSection">
                     <div class="settings-section-head">
                         <span class="settings-section-kicker">Cloudflare</span>
@@ -701,94 +949,19 @@
 
     <!-- iCloud HME 源管理模态框 -->
     <div class="modal" id="icloudHmeSourceModal" onmousedown="if(event.target === this) hideIcloudHmeSourceModal()">
-        <div class="modal-content hme-source-modal-content">
+        <div class="modal-content" style="width: 460px;">
             <div class="modal-header">
-                <h3 id="icloudHmeSourceModalTitle">管理 iCloud HME 源</h3>
+                <h3>iCloud HME 设置已迁移</h3>
                 <button class="modal-close" onclick="hideIcloudHmeSourceModal()">&times;</button>
             </div>
-            <div class="modal-body hme-source-modal-body">
-                <div class="hme-source-layout">
-                    <aside class="hme-source-list-panel">
-                        <div class="hme-source-list-head">
-                            <div>
-                                <strong>HME 源</strong>
-                                <p>接收邮箱、IMAP 与同步入口</p>
-                            </div>
-                            <button class="btn btn-sm btn-secondary" type="button" onclick="openIcloudHmeSourceModal()">新建</button>
-                        </div>
-                        <div class="hme-source-list" id="icloudHmeSourceList">
-                            <div class="hme-source-empty">加载中...</div>
-                        </div>
-                    </aside>
-                    <section class="hme-source-form-panel">
-                        <input type="hidden" id="icloudHmeSourceId">
-                        <div class="settings-panel-grid">
-                            <div class="form-group">
-                                <label class="form-label">源名称</label>
-                                <input type="text" class="form-input" id="icloudHmeSourceName" placeholder="主接收邮箱">
-                            </div>
-                            <div class="form-group">
-                                <label class="form-label">区域</label>
-                                <select class="form-select" id="icloudHmeSourceRegion">
-                                    <option value="global">Global</option>
-                                    <option value="china">China</option>
-                                </select>
-                            </div>
-                            <div class="form-group">
-                                <label class="form-label">接收邮箱</label>
-                                <input type="email" class="form-input" id="icloudHmeReceiverEmail" placeholder="receiver@example.com">
-                            </div>
-                            <div class="form-group">
-                                <label class="form-label">接收邮箱类型</label>
-                                <select class="form-select" id="icloudHmeReceiverProvider">
-                                    <option value="custom">自定义 IMAP</option>
-                                    <option value="icloud">iCloud</option>
-                                    <option value="gmail">Gmail</option>
-                                    <option value="outlook">Outlook</option>
-                                </select>
-                            </div>
-                            <div class="form-group">
-                                <label class="form-label">IMAP 服务器</label>
-                                <input type="text" class="form-input" id="icloudHmeReceiverImapHost" placeholder="imap.example.com">
-                            </div>
-                            <div class="form-group">
-                                <label class="form-label">IMAP 端口</label>
-                                <input type="number" class="form-input" id="icloudHmeReceiverImapPort" value="993" min="1" max="65535">
-                            </div>
-                            <div class="form-group">
-                                <label class="form-label">IMAP 密码 / 授权码</label>
-                                <input type="password" class="form-input" id="icloudHmeReceiverImapPassword" autocomplete="new-password">
-                            </div>
-                            <div class="form-group">
-                                <label class="form-label">接收文件夹</label>
-                                <input type="text" class="form-input" id="icloudHmeReceiverFolder" value="INBOX">
-                            </div>
-                            <div class="form-group">
-                                <label class="settings-toggle settings-toggle--card">
-                                    <input type="checkbox" id="icloudHmeUseSsl" checked>
-                                    <span class="form-label">使用 SSL 连接 IMAP</span>
-                                </label>
-                            </div>
-                            <div class="form-group">
-                                <label class="form-label">Maildomain Host</label>
-                                <input type="text" class="form-input" id="icloudHmeMaildomainHost" placeholder="留空自动选择，例如 p68-maildomainws.icloud.com">
-                            </div>
-                            <div class="form-group settings-form-span-full">
-                                <label class="form-label">iCloud Cookie</label>
-                                <textarea class="form-textarea hme-source-secret" id="icloudHmeCookie" placeholder="用于同步 Hide My Email 地址"></textarea>
-                            </div>
-                        </div>
-                        <div class="settings-action-row hme-source-actions">
-                            <button class="btn btn-secondary" type="button" onclick="testIcloudHmeSourceImap()">测试 IMAP</button>
-                            <button class="btn btn-secondary" type="button" id="icloudHmeSourceSyncBtn" onclick="syncIcloudHmeSource()">同步 HME</button>
-                            <button class="btn btn-danger" type="button" id="icloudHmeSourceDeleteBtn" onclick="deleteIcloudHmeSource()">删除源</button>
-                            <button class="btn btn-primary" type="button" onclick="saveIcloudHmeSource()">保存源</button>
-                        </div>
-                    </section>
-                </div>
+            <div class="modal-body">
+                <p class="form-hint" style="font-size: 13px; line-height: 1.7; margin-top: 0;">
+                    HME 源、地址导入、长时任务和停用扫描已经迁移到系统设置里的 iCloud HME 分区。
+                </p>
             </div>
             <div class="modal-footer">
                 <button class="btn btn-secondary" onclick="hideIcloudHmeSourceModal()">关闭</button>
+                <button class="btn btn-primary" type="button" onclick="hideIcloudHmeSourceModal(); Promise.resolve(showSettingsModal()).then(() => setTimeout(() => scrollSettingsSection('settingsIcloudHmeSection'), 80))">打开 HME 设置</button>
             </div>
         </div>
     </div>

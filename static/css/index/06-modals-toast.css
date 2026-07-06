@@ -1472,6 +1472,163 @@
             font-family: Consolas, Monaco, monospace;
         }
 
+        .hme-settings-summary-grid {
+            display: grid;
+            grid-template-columns: repeat(3, minmax(0, 1fr));
+            gap: 12px;
+        }
+
+        .hme-settings-summary-card {
+            padding: 14px;
+            border: 1px solid #e5e7eb;
+            border-radius: 12px;
+            background: linear-gradient(180deg, #ffffff 0%, #f8fafc 100%);
+            display: grid;
+            gap: 6px;
+        }
+
+        .hme-settings-summary-card span {
+            font-size: 12px;
+            font-weight: 600;
+            color: #6b7280;
+        }
+
+        .hme-settings-summary-card strong {
+            font-size: 22px;
+            line-height: 1.1;
+            color: #111827;
+        }
+
+        .hme-settings-summary-card small {
+            font-size: 12px;
+            color: #6b7280;
+        }
+
+        .hme-settings-drawer {
+            padding: 14px;
+            border: 1px solid #e5e7eb;
+            border-radius: 12px;
+            background: #ffffff;
+            display: grid;
+            gap: 14px;
+        }
+
+        .hme-settings-drawer__head {
+            display: flex;
+            align-items: flex-start;
+            justify-content: space-between;
+            gap: 12px;
+        }
+
+        .hme-settings-drawer__head h5 {
+            margin: 0;
+            color: #111827;
+            font-size: 14px;
+            font-weight: 700;
+        }
+
+        .hme-settings-drawer__head p {
+            margin: 5px 0 0;
+            color: #6b7280;
+            font-size: 12px;
+            line-height: 1.55;
+        }
+
+        .hme-settings-filter-grid {
+            display: grid;
+            grid-template-columns: minmax(220px, 1.4fr) repeat(3, minmax(140px, 1fr));
+            gap: 12px;
+            align-items: end;
+        }
+
+        .hme-settings-filter-grid .form-group {
+            margin-bottom: 0;
+        }
+
+        .hme-settings-table-wrap {
+            overflow-x: auto;
+            border: 1px solid #e5e7eb;
+            border-radius: 12px;
+            background: #ffffff;
+        }
+
+        .hme-settings-table-wrap table {
+            width: 100%;
+            min-width: 720px;
+            border-collapse: collapse;
+        }
+
+        .hme-settings-table-wrap th,
+        .hme-settings-table-wrap td {
+            padding: 11px 12px;
+            border-bottom: 1px solid #eef2f7;
+            text-align: left;
+            font-size: 13px;
+            color: #374151;
+        }
+
+        .hme-settings-table-wrap th {
+            background: #f8fafc;
+            color: #111827;
+            font-weight: 600;
+        }
+
+        .hme-settings-table-wrap tr:last-child td {
+            border-bottom: none;
+        }
+
+        .hme-status-pill,
+        .hme-group-badge {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            width: fit-content;
+            border-radius: 999px;
+            font-size: 12px;
+            font-weight: 600;
+            white-space: nowrap;
+        }
+
+        .hme-status-pill {
+            padding: 5px 10px;
+            border: 1px solid #d1d5db;
+            background: #f9fafb;
+            color: #374151;
+        }
+
+        .hme-group-badge {
+            padding: 3px 8px;
+            border: 1px solid #e5e7eb;
+            background: #ffffff;
+            color: #4b5563;
+        }
+
+        .hme-long-runner-status {
+            padding: 10px 12px;
+            border: 1px solid #e5e7eb;
+            border-radius: 10px;
+            background: #f8fafc;
+            color: #374151;
+            font-size: 13px;
+            line-height: 1.5;
+        }
+
+        .hme-long-runner-log {
+            min-height: 140px;
+            max-height: 260px;
+            margin: 0;
+            padding: 12px;
+            overflow-y: auto;
+            border: 1px solid #e5e7eb;
+            border-radius: 10px;
+            background: #111827;
+            color: #e5e7eb;
+            font-family: Consolas, Monaco, monospace;
+            font-size: 12px;
+            line-height: 1.6;
+            white-space: pre-wrap;
+        }
+
         .settings-log-drawers {
             display: grid;
             gap: 10px;
@@ -1623,6 +1780,8 @@
             .settings-panel-grid,
             .settings-grid,
             .settings-choice-row,
+            .hme-settings-summary-grid,
+            .hme-settings-filter-grid,
             .forward-channel-picker,
             .forward-grid {
                 grid-template-columns: 1fr;
@@ -1659,6 +1818,7 @@
             .refresh-list-panel__head,
             .forwarding-channel-group__head,
             .forward-channel-panel__header,
+            .hme-settings-drawer__head,
             .settings-log-drawer__summary {
                 flex-direction: column;
                 align-items: stretch;
