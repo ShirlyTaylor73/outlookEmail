@@ -333,11 +333,17 @@ user@example.com----app-password----imap.example.com----993
 
 iCloud Hide My Email (HME) 地址按独立邮箱账号管理。导入后，每个 HME 地址都会出现在普通邮箱分组中，可以像其他普通邮箱一样读取邮件、分享只读页面，并通过对外 API 查询。
 
-导入 HME 地址前，必须先在系统中配置 HME 接收源。接收源负责读取这些 HME 地址实际转发到的收件箱，可以选择：
+HME 的全局配置入口在右上角「系统设置」里的「iCloud HME」分区。导入 HME 地址前，必须先在这里配置 HME 接收源。接收源负责读取这些 HME 地址实际转发到的收件箱，可以选择：
 
 - iCloud Mail
 - Gmail
 - 自定义 IMAP
+
+「iCloud HME」设置分区还提供：
+
+- **使用中地址与导入状态**：从 iCloud 实时读取或使用本地缓存查看 HME 地址，列表会显示是否已导入、冲突状态，以及已导入账号所属的 `group_id` 和分组名称。
+- **长时定时注册任务**：可设置 HME 源、目标分组、注册数量、label、备注、成功延迟、失败延迟并启动或中止任务；注册成功的 HME 地址会写入 SQLite 记录并自动导入到目标普通邮箱分组。
+- **OpenAI Access Deactivated 扫描**：可扫描发送给 HME 地址且标题类似 `OpenAI - Access Deactivated [C-...]` 的邮件，先生成候选列表，用户确认后再按 `deactivate -> delete` 顺序停用并删除对应 iCloud HME 地址。本地账号不会物理删除，只会标记为 inactive 并记录处理结果。
 
 HME 导入格式如下：
 
