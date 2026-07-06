@@ -1007,6 +1007,20 @@ def normalize_group_sort_orders_on_startup(cursor) -> None:
             )
 
 
+def reset_interrupted_icloud_hme_generation_tasks(conn) -> None:
+    conn.execute(
+        """
+        UPDATE icloud_hme_generation_tasks
+        SET status = 'stopped',
+            stop_requested = 1,
+            last_error = 'interrupted by process restart',
+            stopped_at = CURRENT_TIMESTAMP,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE status IN ('running', 'stopping')
+        """
+    )
+
+
 def init_db():
     """初始化数据库"""
     conn = sqlite3.connect(DATABASE)
@@ -1130,6 +1144,94 @@ def init_db():
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (source_message_id) REFERENCES icloud_hme_source_messages (id) ON DELETE CASCADE,
             FOREIGN KEY (source_id) REFERENCES icloud_hme_sources (id) ON DELETE CASCADE
+        )
+    ''')
+
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS icloud_hme_address_cache (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            source_id INTEGER NOT NULL,
+            hme TEXT NOT NULL,
+            label TEXT DEFAULT '',
+            note TEXT DEFAULT '',
+            status TEXT NOT NULL DEFAULT 'active',
+            last_seen_at TIMESTAMP,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(source_id, hme),
+            FOREIGN KEY (source_id) REFERENCES icloud_hme_sources (id) ON DELETE CASCADE
+        )
+    ''')
+
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS icloud_hme_generation_tasks (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            source_id INTEGER,
+            batch_id TEXT DEFAULT '',
+            status TEXT NOT NULL DEFAULT 'pending',
+            total_requested INTEGER NOT NULL DEFAULT 0,
+            generated_count INTEGER NOT NULL DEFAULT 0,
+            success_count INTEGER NOT NULL DEFAULT 0,
+            failed_count INTEGER NOT NULL DEFAULT 0,
+            duplicate_count INTEGER NOT NULL DEFAULT 0,
+            stop_requested INTEGER NOT NULL DEFAULT 0,
+            last_error TEXT DEFAULT '',
+            started_at TIMESTAMP,
+            stopped_at TIMESTAMP,
+            finished_at TIMESTAMP,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (source_id) REFERENCES icloud_hme_sources (id) ON DELETE SET NULL
+        )
+    ''')
+
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS icloud_hme_generated_addresses (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            task_id INTEGER,
+            source_id INTEGER,
+            hme TEXT NOT NULL,
+            label TEXT DEFAULT '',
+            note TEXT DEFAULT '',
+            status TEXT NOT NULL DEFAULT 'generated',
+            account_id INTEGER,
+            error_message TEXT DEFAULT '',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (task_id) REFERENCES icloud_hme_generation_tasks (id) ON DELETE CASCADE,
+            FOREIGN KEY (source_id) REFERENCES icloud_hme_sources (id) ON DELETE SET NULL,
+            FOREIGN KEY (account_id) REFERENCES accounts (id) ON DELETE SET NULL
+        )
+    ''')
+
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS icloud_hme_generation_logs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            task_id INTEGER NOT NULL,
+            level TEXT NOT NULL DEFAULT 'info',
+            message TEXT NOT NULL DEFAULT '',
+            details_json TEXT DEFAULT '',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (task_id) REFERENCES icloud_hme_generation_tasks (id) ON DELETE CASCADE
+        )
+    ''')
+
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS icloud_hme_deactivation_candidates (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            source_id INTEGER NOT NULL,
+            hme TEXT NOT NULL,
+            account_id INTEGER,
+            reason TEXT DEFAULT '',
+            status TEXT NOT NULL DEFAULT 'pending',
+            detected_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            deactivated_at TIMESTAMP,
+            last_error TEXT DEFAULT '',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(source_id, hme),
+            FOREIGN KEY (source_id) REFERENCES icloud_hme_sources (id) ON DELETE CASCADE,
+            FOREIGN KEY (account_id) REFERENCES accounts (id) ON DELETE SET NULL
         )
     ''')
 
@@ -1998,6 +2100,31 @@ def init_db():
     ''')
 
     cursor.execute('''
+        CREATE INDEX IF NOT EXISTS idx_icloud_hme_address_cache_source
+        ON icloud_hme_address_cache(source_id, hme)
+    ''')
+
+    cursor.execute('''
+        CREATE INDEX IF NOT EXISTS idx_icloud_hme_generation_tasks_status
+        ON icloud_hme_generation_tasks(status, updated_at)
+    ''')
+
+    cursor.execute('''
+        CREATE INDEX IF NOT EXISTS idx_icloud_hme_generated_addresses_task
+        ON icloud_hme_generated_addresses(task_id, id)
+    ''')
+
+    cursor.execute('''
+        CREATE INDEX IF NOT EXISTS idx_icloud_hme_generation_logs_task
+        ON icloud_hme_generation_logs(task_id, id)
+    ''')
+
+    cursor.execute('''
+        CREATE INDEX IF NOT EXISTS idx_icloud_hme_deactivation_candidates_source_status
+        ON icloud_hme_deactivation_candidates(source_id, status)
+    ''')
+
+    cursor.execute('''
         CREATE UNIQUE INDEX IF NOT EXISTS ux_icloud_hme_source_mail_sync_state
         ON icloud_hme_source_mail_sync_state(source_id, folder)
     ''')
@@ -2214,6 +2341,8 @@ def init_db():
 
     # 迁移现有明文数据为加密数据
     migrate_sensitive_data(conn)
+
+    reset_interrupted_icloud_hme_generation_tasks(conn)
 
     conn.commit()
     conn.close()
