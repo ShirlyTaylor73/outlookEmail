@@ -44,6 +44,7 @@ class ICloudHmeLongRunnerTestCase(unittest.TestCase):
                 'account_aliases',
                 'account_tags',
                 'accounts',
+                'groups',
                 'icloud_hme_sources',
             ):
                 try:
@@ -51,6 +52,14 @@ class ICloudHmeLongRunnerTestCase(unittest.TestCase):
                 except sqlite3.OperationalError as exc:
                     if 'no such table' not in str(exc):
                         raise
+            cursor = db.execute(
+                '''
+                INSERT INTO groups (name, mailbox_type)
+                VALUES (?, 'account')
+                ''',
+                ('Long Runner Target',),
+            )
+            self.target_group_id = int(cursor.lastrowid)
             db.commit()
             web_outlook_app.ICLOUD_HME_LONG_RUNNER_PAYLOADS.clear()
             web_outlook_app.ICLOUD_HME_LONG_RUNNER_STOP.clear()
@@ -93,7 +102,7 @@ class ICloudHmeLongRunnerTestCase(unittest.TestCase):
     def _start_payload(self, source_id, **overrides):
         payload = {
             'source_id': source_id,
-            'target_group_id': 1,
+            'target_group_id': self.target_group_id,
             'target_count': 1,
             'label_prefix': 'TestHME',
             'note': 'created by long-runner test',
@@ -240,7 +249,7 @@ class ICloudHmeLongRunnerTestCase(unittest.TestCase):
         self.assertIsNotNone(generated_rows[0]['account_id'])
         self.assertIsNotNone(account)
         self.assertEqual(account['email'], generated_hme)
-        self.assertEqual(account['group_id'], 1)
+        self.assertEqual(account['group_id'], self.target_group_id)
         self.assertEqual(account['account_type'], 'icloud_hme')
         self.assertEqual(account['provider'], 'icloud_hme')
         self.assertEqual(account['icloud_hme_source_id'], source_id)
