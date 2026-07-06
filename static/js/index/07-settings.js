@@ -5,6 +5,12 @@
         let settingsScrollSyncFrame = 0;
         let lastLoadedWebdavBackupSettings = null;
         let icloudHmeSourcesCache = [];
+        let icloudHmeAddressCache = [];
+        let icloudHmeAddressPagination = { limit: 50, offset: 0, total: 0 };
+        let icloudHmeSelectedAddresses = new Set();
+        let icloudHmeLongRunnerStatus = null;
+        let icloudHmeDeactivationCandidates = [];
+        let icloudHmeSettingsEventsBound = false;
         let lastNormalMailRetentionStatus = null;
         let normalMailRetentionStatusPollTimer = null;
         let normalMailRetentionStatusPollDelayMs = 0;
@@ -176,11 +182,19 @@
         // 显示设置模态框
         async function showSettingsModal() {
             ensureSettingsScrollSync();
+            ensureIcloudHmeSettingsEvents();
             showModal('settingsModal');
             scrollSettingsSection('settingsGeneralSection');
             populateTimeZoneOptions(getAppTimeZone());
             await loadSettings();
+            await loadIcloudHmeSources();
+            await loadIcloudHmeLongRunnerStatus();
             scheduleSettingsSidebarSync();
+        }
+
+        async function openIcloudHmeSettings() {
+            await showSettingsModal();
+            window.setTimeout(() => scrollSettingsSection('settingsIcloudHmeSection'), 80);
         }
 
         // 隐藏设置模态框
@@ -817,11 +831,661 @@
                 renderIcloudHmeSourceOptions(document.getElementById('importIcloudHmeSourceSelect'), selectedId);
                 renderIcloudHmeSourceOptions(document.getElementById('editIcloudHmeSourceSelect'), selectedId);
                 renderIcloudHmeSourceList();
+                renderIcloudHmeGroupOptions();
                 return icloudHmeSourcesCache;
             } catch (error) {
                 showToast(error.message || '加载 iCloud HME 源失败', 'error');
                 return [];
             }
+        }
+
+        function getIcloudHmeAccountGroups() {
+            if (typeof getGroupsByMailboxType === 'function') {
+                return getGroupsByMailboxType('account');
+            }
+            return Array.isArray(groups) ? groups : [];
+        }
+
+        function getIcloudHmeGroupLabel(group) {
+            if (!group) return '';
+            const name = typeof normalizeGroupName === 'function'
+                ? normalizeGroupName(group.name)
+                : (group.name || `Group ${group.id}`);
+            return `${name} (Group ID ${group.id})`;
+        }
+
+        function renderIcloudHmeGroupOptions() {
+            const select = document.getElementById('icloudHmeAddressGroupFilter');
+            if (!select) return;
+            const currentValue = select.value || '';
+            const options = ['<option value="">全部分组</option>'];
+            getIcloudHmeAccountGroups().forEach(group => {
+                options.push(`<option value="${Number(group.id)}">${escapeHtml(getIcloudHmeGroupLabel(group))}</option>`);
+            });
+            select.innerHTML = options.join('');
+            if (currentValue && Array.from(select.options).some(option => option.value === currentValue)) {
+                select.value = currentValue;
+            } else if (currentGroupId && Array.from(select.options).some(option => option.value === String(currentGroupId))) {
+                select.value = String(currentGroupId);
+            }
+        }
+
+        function getSelectedIcloudHmeSourceId({ allowFallback = true } = {}) {
+            const formSourceId = document.getElementById('icloudHmeSourceId')?.value || '';
+            if (formSourceId) return formSourceId;
+            const importSourceId = document.getElementById('importIcloudHmeSourceSelect')?.value || '';
+            if (importSourceId) return importSourceId;
+            if (allowFallback && icloudHmeSourcesCache.length) {
+                return String(icloudHmeSourcesCache[0].id);
+            }
+            return '';
+        }
+
+        function getIcloudHmeAddressFilters() {
+            const importStateValue = document.getElementById('icloudHmeAddressImportStateFilter')?.value || '';
+            const importStateMap = {
+                pending: 'not_imported',
+                failed: 'conflict'
+            };
+            return {
+                source_id: getSelectedIcloudHmeSourceId(),
+                keyword: document.getElementById('icloudHmeAddressSearchInput')?.value.trim() || '',
+                active: document.getElementById('icloudHmeAddressActiveFilter')?.value || '',
+                import_state: importStateMap[importStateValue] || importStateValue,
+                group_id: document.getElementById('icloudHmeAddressGroupFilter')?.value || ''
+            };
+        }
+
+        async function loadIcloudHmeAddresses({ refresh = false, offset = 0 } = {}) {
+            if (!icloudHmeSourcesCache.length) {
+                await loadIcloudHmeSources();
+            }
+            const filters = getIcloudHmeAddressFilters();
+            if (!filters.source_id) {
+                renderIcloudHmeAddressSummary({ total: 0, imported: 0, not_imported: 0, conflict: 0 });
+                renderIcloudHmeAddressList([]);
+                showToast('请先新建或选择 iCloud HME 源', 'error');
+                return [];
+            }
+
+            const safeOffset = Math.max(0, Number(offset) || 0);
+            const pageLimit = icloudHmeAddressPagination.limit || 50;
+            const params = new URLSearchParams({
+                source_id: filters.source_id,
+                limit: String(safeOffset + pageLimit),
+                refresh: refresh ? 'true' : 'false'
+            });
+            if (filters.keyword) params.set('keyword', filters.keyword);
+            if (filters.active) params.set('active', filters.active);
+            if (filters.import_state) params.set('import_state', filters.import_state);
+
+            const bodyEl = document.getElementById('icloudHmeAddressTableBody');
+            if (bodyEl) {
+                bodyEl.innerHTML = '<tr><td colspan="6">正在加载 HME 地址...</td></tr>';
+            }
+
+            try {
+                const response = await fetch(`/api/icloud-hme/addresses?${params.toString()}`, { cache: 'no-store' });
+                const data = await response.json();
+                if (!response.ok || !data.success) {
+                    throw new Error(data.error || '加载 iCloud HME 地址失败');
+                }
+
+                const allItems = Array.isArray(data.items) ? data.items : [];
+                const groupFilteredItems = filters.group_id
+                    ? allItems.filter(item => !item.group_id || String(item.group_id || '') === String(filters.group_id))
+                    : allItems;
+                const pageItems = groupFilteredItems.slice(safeOffset, safeOffset + pageLimit);
+                const counts = data.counts || {};
+                icloudHmeAddressCache = groupFilteredItems;
+                icloudHmeAddressPagination = {
+                    limit: pageLimit,
+                    offset: safeOffset,
+                    total: filters.group_id ? groupFilteredItems.length : Number(counts.filtered ?? groupFilteredItems.length)
+                };
+                const visibleEmails = new Set(groupFilteredItems.map(item => item.hme));
+                icloudHmeSelectedAddresses = new Set(
+                    Array.from(icloudHmeSelectedAddresses).filter(email => visibleEmails.has(email))
+                );
+                document.getElementById('icloudHmeAddressDrawer')?.setAttribute('data-loaded', 'true');
+                renderIcloudHmeAddressSummary({
+                    ...counts,
+                    total: filters.group_id ? groupFilteredItems.length : counts.total,
+                    filtered: icloudHmeAddressPagination.total,
+                    active: groupFilteredItems.filter(item => item.is_active).length
+                });
+                renderIcloudHmeAddressList(pageItems);
+                if (data.refresh_error) {
+                    showToast(data.refresh_error, 'warning');
+                }
+                return pageItems;
+            } catch (error) {
+                renderIcloudHmeAddressList([]);
+                showToast(error.message || '加载 iCloud HME 地址失败', 'error');
+                return [];
+            }
+        }
+
+        function renderIcloudHmeAddressSummary(summary = {}) {
+            const container = document.getElementById('icloudHmeSummaryCards');
+            if (!container) return;
+            const total = Number(summary.filtered ?? summary.total ?? 0);
+            const active = Number(summary.active ?? 0);
+            const imported = Number(summary.imported ?? 0);
+            const pending = Number(summary.not_imported ?? summary.pending ?? 0);
+            const conflict = Number(summary.conflict ?? 0);
+            container.innerHTML = `
+                <article class="hme-settings-summary-card">
+                    <span>使用中地址</span>
+                    <strong>${active}</strong>
+                    <small>当前筛选共 ${total} 个地址</small>
+                </article>
+                <article class="hme-settings-summary-card">
+                    <span>已导入账号</span>
+                    <strong>${imported}</strong>
+                    <small>导入后显示目标分组</small>
+                </article>
+                <article class="hme-settings-summary-card">
+                    <span>待处理</span>
+                    <strong>${pending + conflict}</strong>
+                    <small>未导入 ${pending} 个，冲突 ${conflict} 个</small>
+                </article>
+            `;
+        }
+
+        function formatIcloudHmeTimestamp(value) {
+            if (!value) return '--';
+            if (typeof formatAbsoluteDateTime === 'function') {
+                return formatAbsoluteDateTime(value);
+            }
+            return String(value);
+        }
+
+        function renderIcloudHmeAddressImportCell(item) {
+            const state = item.import_state || 'not_imported';
+            if (state === 'imported') {
+                const groupText = item.group_id
+                    ? `Group ID ${item.group_id}${item.group_name ? ` / ${item.group_name}` : ''}`
+                    : '已导入';
+                return `<span class="status-badge success">已导入</span><small>${escapeHtml(groupText)}</small>`;
+            }
+            if (state === 'conflict' || item.conflict) {
+                const details = [
+                    item.account_id ? `existing account #${item.account_id}` : '',
+                    item.existing_source_id ? `source #${item.existing_source_id}` : ''
+                ].filter(Boolean).join(' / ') || 'existing account/source';
+                return `<span class="status-badge warning">冲突</span><small>${escapeHtml(details)}</small>`;
+            }
+            return `<span class="status-badge">未导入</span>
+                <button class="btn btn-sm btn-primary" type="button" data-action="import-address" data-email="${escapeHtml(item.hme)}">导入</button>`;
+        }
+
+        function renderIcloudHmeAddressList(addresses) {
+            const bodyEl = document.getElementById('icloudHmeAddressTableBody');
+            if (!bodyEl) return;
+            if (!Array.isArray(addresses) || !addresses.length) {
+                bodyEl.innerHTML = '<tr><td colspan="6">暂无 HME 地址，请先同步或刷新地址。</td></tr>';
+                return;
+            }
+
+            bodyEl.innerHTML = addresses.map(item => {
+                const email = item.hme || '';
+                const checked = icloudHmeSelectedAddresses.has(email) ? 'checked' : '';
+                const groupText = item.group_id
+                    ? `Group ID ${item.group_id}${item.group_name ? ` / ${item.group_name}` : ''}`
+                    : '未导入';
+                const anonymousId = item.anonymous_id
+                    ? `<small>anonymousId: ${escapeHtml(item.anonymous_id)}</small>`
+                    : '';
+                return `
+                    <tr>
+                        <td>
+                            <label class="checkbox-label">
+                                <input type="checkbox" class="icloud-hme-address-checkbox" data-email="${escapeHtml(email)}" ${checked}>
+                                <span>
+                                    <strong>${escapeHtml(email)}</strong>
+                                    ${item.label ? `<small>${escapeHtml(item.label)}</small>` : ''}
+                                    ${anonymousId}
+                                </span>
+                            </label>
+                        </td>
+                        <td>${item.is_active ? '<span class="status-badge success">启用</span>' : '<span class="status-badge">停用</span>'}</td>
+                        <td>${renderIcloudHmeAddressImportCell(item)}</td>
+                        <td>${escapeHtml(groupText)}</td>
+                        <td>${escapeHtml(formatIcloudHmeTimestamp(item.updated_at || item.last_seen_at || item.created_at))}</td>
+                        <td>
+                            <button class="btn btn-sm btn-secondary" type="button" data-action="select-address" data-email="${escapeHtml(email)}">选择</button>
+                        </td>
+                    </tr>
+                `;
+            }).join('');
+        }
+
+        function escapeCssAttributeValue(value) {
+            if (typeof window !== 'undefined' && window.CSS && typeof window.CSS.escape === 'function') {
+                return window.CSS.escape(value);
+            }
+            return String(value || '').replace(/["\\]/g, '\\$&');
+        }
+
+        function toggleIcloudHmeAddressSelection(email, checked) {
+            const normalized = String(email || '').trim().toLowerCase();
+            if (!normalized) return;
+            if (checked) {
+                icloudHmeSelectedAddresses.add(normalized);
+            } else {
+                icloudHmeSelectedAddresses.delete(normalized);
+            }
+            document.querySelectorAll(`.icloud-hme-address-checkbox[data-email="${escapeCssAttributeValue(normalized)}"]`).forEach(checkbox => {
+                checkbox.checked = icloudHmeSelectedAddresses.has(normalized);
+            });
+        }
+
+        function toggleAllIcloudHmeAddressSelection(checked) {
+            document.querySelectorAll('.icloud-hme-address-checkbox').forEach(checkbox => {
+                checkbox.checked = !!checked;
+                toggleIcloudHmeAddressSelection(checkbox.dataset.email, !!checked);
+            });
+        }
+
+        async function importSelectedIcloudHmeAddresses() {
+            const sourceId = getSelectedIcloudHmeSourceId();
+            const groupId = document.getElementById('icloudHmeAddressGroupFilter')?.value || '';
+            const addresses = Array.from(icloudHmeSelectedAddresses);
+            if (!sourceId) {
+                showToast('请先选择 HME 源', 'error');
+                return;
+            }
+            if (!groupId) {
+                showToast('请选择目标分组', 'error');
+                return;
+            }
+            if (!addresses.length) {
+                showToast('请至少选择一个 HME 地址', 'error');
+                return;
+            }
+
+            try {
+                const response = await fetch('/api/icloud-hme/addresses/import', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        source_id: sourceId,
+                        group_id: groupId,
+                        addresses
+                    })
+                });
+                const data = await response.json();
+                if (!response.ok || !data.success) {
+                    handleApiError(data, '导入 HME 地址失败');
+                    return;
+                }
+                const imported = Number(data.imported_count || 0);
+                const updated = Number(data.updated_count || 0);
+                const conflicts = Number(data.conflict_count || 0);
+                const errors = Number(data.error_count || 0);
+                showToast(`导入完成：新增 ${imported} 个，更新 ${updated} 个，冲突 ${conflicts} 个，失败 ${errors} 个`, errors ? 'warning' : 'success');
+                icloudHmeSelectedAddresses.clear();
+                delete accountsCache[groupId];
+                await loadGroups();
+                if (currentGroupId) {
+                    await loadAccountsByGroup(currentGroupId, true);
+                } else {
+                    await refreshVisibleAccountList(false);
+                }
+                await loadIcloudHmeAddresses({ refresh: false, offset: icloudHmeAddressPagination.offset });
+            } catch (error) {
+                showToast('导入 HME 地址失败', 'error');
+            }
+        }
+
+        async function importIcloudHmeAddress(email) {
+            icloudHmeSelectedAddresses = new Set([String(email || '').trim().toLowerCase()].filter(Boolean));
+            renderIcloudHmeAddressList(icloudHmeAddressCache.slice(
+                icloudHmeAddressPagination.offset,
+                icloudHmeAddressPagination.offset + icloudHmeAddressPagination.limit
+            ));
+            await importSelectedIcloudHmeAddresses();
+        }
+
+        function getIcloudHmeLongRunnerPayload() {
+            const form = document.getElementById('icloudHmeLongRunnerForm');
+            const textInput = form?.querySelector('input[type="text"]');
+            const countInput = form?.querySelector('input[type="number"]');
+            const noteInput = form?.querySelector('textarea');
+            const sourceId = getSelectedIcloudHmeSourceId();
+            const groupSelectValue = document.getElementById('icloudHmeAddressGroupFilter')?.value || '';
+            const fallbackGroupId = currentGroupId || getIcloudHmeAccountGroups()[0]?.id || '';
+            return {
+                source_id: sourceId,
+                target_group_id: groupSelectValue || fallbackGroupId,
+                total_requested: parseInt(countInput?.value || '1', 10) || 1,
+                note: noteInput?.value.trim() || '',
+                run_window: textInput?.value.trim() || ''
+            };
+        }
+
+        async function loadIcloudHmeLongRunnerStatus() {
+            try {
+                const response = await fetch('/api/icloud-hme/long-runner/status', { cache: 'no-store' });
+                const data = await response.json();
+                if (!response.ok || !data.success) {
+                    throw new Error(data.error || '加载 HME 长时任务状态失败');
+                }
+                icloudHmeLongRunnerStatus = data.task || { status: 'idle' };
+                renderIcloudHmeLongRunnerStatus(icloudHmeLongRunnerStatus);
+                await loadIcloudHmeLongRunnerLogs();
+                return icloudHmeLongRunnerStatus;
+            } catch (error) {
+                renderIcloudHmeLongRunnerStatus({ status: 'failed', last_error: error.message });
+                return null;
+            }
+        }
+
+        function renderIcloudHmeLongRunnerStatus(status) {
+            const currentStatus = status?.status || 'idle';
+            const statusEl = document.getElementById('icloudHmeLongRunnerStatus');
+            const form = document.getElementById('icloudHmeLongRunnerForm');
+            const buttons = form ? Array.from(form.querySelectorAll('button')) : [];
+            const startBtn = buttons[0];
+            const stopButtons = buttons.slice(1);
+            const active = ['pending', 'running', 'stopping'].includes(currentStatus);
+            const startDisabled = ['running', 'stopping'].includes(currentStatus);
+            const stopEnabled = currentStatus === 'running';
+            if (statusEl) {
+                const progress = status?.total_requested
+                    ? `进度：${Number(status.success_count || 0) + Number(status.failed_count || 0)}/${status.total_requested}`
+                    : '尚未启动';
+                const errorText = status?.last_error ? `，错误：${status.last_error}` : '';
+                statusEl.textContent = `长时任务状态：${currentStatus}，${progress}${errorText}`;
+            }
+            if (startBtn) startBtn.disabled = startDisabled;
+            stopButtons.forEach(button => {
+                button.disabled = !stopEnabled;
+            });
+            document.querySelector('#settingsIcloudHmeSection .hme-status-pill')?.replaceChildren(document.createTextNode(active ? currentStatus : '空闲'));
+        }
+
+        async function loadIcloudHmeLongRunnerLogs() {
+            const logsEl = document.getElementById('icloudHmeLongRunnerLogs');
+            if (!logsEl) return [];
+            const taskId = icloudHmeLongRunnerStatus?.id;
+            const params = new URLSearchParams({ limit: '200' });
+            if (taskId) params.set('task_id', String(taskId));
+            try {
+                const response = await fetch(`/api/icloud-hme/long-runner/logs?${params.toString()}`, { cache: 'no-store' });
+                const data = await response.json();
+                if (!response.ok || !data.success) {
+                    throw new Error(data.error || '加载 HME 长时任务日志失败');
+                }
+                const logs = Array.isArray(data.logs) ? data.logs : [];
+                logsEl.textContent = logs.length
+                    ? logs.map(log => `[${formatIcloudHmeTimestamp(log.created_at)}] ${log.level || 'info'}: ${log.message || ''}`).join('\n')
+                    : '暂无运行日志';
+                return logs;
+            } catch (error) {
+                logsEl.textContent = error.message || '加载 HME 长时任务日志失败';
+                return [];
+            }
+        }
+
+        async function startIcloudHmeLongRunner() {
+            const payload = getIcloudHmeLongRunnerPayload();
+            if (!payload.source_id) {
+                showToast('请先选择 HME 源', 'error');
+                return;
+            }
+            if (!payload.target_group_id) {
+                showToast('请选择目标分组', 'error');
+                return;
+            }
+            try {
+                const response = await fetch('/api/icloud-hme/long-runner/start', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+                const data = await response.json();
+                if (!response.ok || !data.success) {
+                    handleApiError(data, '启动 HME 长时注册任务失败');
+                    return;
+                }
+                icloudHmeLongRunnerStatus = data.task || { status: 'pending' };
+                renderIcloudHmeLongRunnerStatus(icloudHmeLongRunnerStatus);
+                await loadIcloudHmeLongRunnerLogs();
+                showToast('HME 长时注册任务已启动', 'success');
+            } catch (error) {
+                showToast('启动 HME 长时注册任务失败', 'error');
+            }
+        }
+
+        async function stopIcloudHmeLongRunner() {
+            const payload = icloudHmeLongRunnerStatus?.id ? { task_id: icloudHmeLongRunnerStatus.id } : {};
+            try {
+                const response = await fetch('/api/icloud-hme/long-runner/stop', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+                const data = await response.json();
+                if (!response.ok || !data.success) {
+                    handleApiError(data, '停止 HME 长时注册任务失败');
+                    return;
+                }
+                icloudHmeLongRunnerStatus = data.task || { status: 'stopping' };
+                renderIcloudHmeLongRunnerStatus(icloudHmeLongRunnerStatus);
+                await loadIcloudHmeLongRunnerLogs();
+                showToast('已请求停止 HME 长时注册任务', 'success');
+            } catch (error) {
+                showToast('停止 HME 长时注册任务失败', 'error');
+            }
+        }
+
+        function getIcloudHmeDeactivationScanPayload() {
+            return {
+                source_id: getSelectedIcloudHmeSourceId(),
+                group_id: document.getElementById('icloudHmeAddressGroupFilter')?.value || '',
+                folder: 'all',
+                subject_contains: 'OpenAI - Access Deactivated',
+                limit: 200,
+                refresh: false
+            };
+        }
+
+        async function scanIcloudHmeDeactivationCandidates() {
+            const payload = getIcloudHmeDeactivationScanPayload();
+            if (!payload.source_id) {
+                showToast('请先选择 HME 源', 'error');
+                return;
+            }
+            try {
+                const response = await fetch('/api/icloud-hme/deactivation-candidates/scan', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+                const data = await response.json();
+                if (!response.ok || !data.success) {
+                    handleApiError(data, '扫描 HME 停用候选失败');
+                    return;
+                }
+                showToast(`扫描完成：发现 ${Number(data.candidate_count || 0)} 个候选`, 'success');
+                await loadIcloudHmeDeactivationCandidates();
+            } catch (error) {
+                showToast('扫描 HME 停用候选失败', 'error');
+            }
+        }
+
+        async function loadIcloudHmeDeactivationCandidates() {
+            const sourceId = getSelectedIcloudHmeSourceId();
+            if (!sourceId) {
+                renderIcloudHmeDeactivationCandidates([]);
+                return [];
+            }
+            const params = new URLSearchParams({ source_id: sourceId, limit: '200' });
+            try {
+                const response = await fetch(`/api/icloud-hme/deactivation-candidates?${params.toString()}`, { cache: 'no-store' });
+                const data = await response.json();
+                if (!response.ok || !data.success) {
+                    throw new Error(data.error || '获取 HME 停用候选失败');
+                }
+                icloudHmeDeactivationCandidates = Array.isArray(data.candidates) ? data.candidates : [];
+                renderIcloudHmeDeactivationCandidates(icloudHmeDeactivationCandidates);
+                return icloudHmeDeactivationCandidates;
+            } catch (error) {
+                renderIcloudHmeDeactivationCandidates([]);
+                showToast(error.message || '获取 HME 停用候选失败', 'error');
+                return [];
+            }
+        }
+
+        function renderIcloudHmeDeactivationCandidates(candidates) {
+            const bodyEl = document.getElementById('icloudHmeDeactivationCandidateTableBody');
+            if (!bodyEl) return;
+            if (!Array.isArray(candidates) || !candidates.length) {
+                bodyEl.innerHTML = '<tr><td colspan="5">暂无 Access Deactivated 候选。</td></tr>';
+                return;
+            }
+            bodyEl.innerHTML = candidates.map(candidate => {
+                const statusText = candidate.error
+                    ? `${candidate.status || 'error'}：${candidate.error}`
+                    : (candidate.status || 'pending');
+                return `
+                    <tr>
+                        <td>
+                            <label class="checkbox-label">
+                                <input type="checkbox" class="icloud-hme-candidate-checkbox" data-id="${Number(candidate.id)}">
+                                <span>
+                                    <strong>${escapeHtml(candidate.hme || '')}</strong>
+                                    ${candidate.anonymous_id ? `<small>anonymousId: ${escapeHtml(candidate.anonymous_id)}</small>` : ''}
+                                    ${candidate.group_id ? `<small>Group ID ${Number(candidate.group_id)}${candidate.group_name ? ` / ${escapeHtml(candidate.group_name)}` : ''}</small>` : ''}
+                                </span>
+                            </label>
+                        </td>
+                        <td>${escapeHtml(formatIcloudHmeTimestamp(candidate.detected_at || candidate.updated_at || candidate.created_at))}</td>
+                        <td>${escapeHtml(candidate.reason || 'OpenAI - Access Deactivated')}</td>
+                        <td>${escapeHtml(statusText)}</td>
+                        <td>
+                            <button class="btn btn-sm btn-danger" type="button" data-action="delete-candidate" data-id="${Number(candidate.id)}">删除</button>
+                        </td>
+                    </tr>
+                `;
+            }).join('');
+        }
+
+        async function deleteSelectedIcloudHmeCandidates() {
+            const sourceId = getSelectedIcloudHmeSourceId();
+            const ids = Array.from(document.querySelectorAll('.icloud-hme-candidate-checkbox:checked'))
+                .map(checkbox => parseInt(checkbox.dataset.id || '', 10))
+                .filter(Number.isFinite);
+            if (!sourceId) {
+                showToast('请先选择 HME 源', 'error');
+                return;
+            }
+            if (!ids.length) {
+                showToast('请选择要删除的停用候选', 'error');
+                return;
+            }
+            const confirmed = await showConfirmModal(
+                `确定要停用并删除 HME 地址，此操作不可逆。将处理 ${ids.length} 个候选项，是否继续？`,
+                { title: '删除 HME 停用候选', confirmText: '确认停用并删除' }
+            );
+            if (!confirmed) return;
+
+            try {
+                const response = await fetch('/api/icloud-hme/deactivation-candidates/delete', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        source_id: sourceId,
+                        candidate_ids: ids
+                    })
+                });
+                const data = await response.json();
+                if (!response.ok || !data.success) {
+                    handleApiError(data, '删除 HME 停用候选失败');
+                    return;
+                }
+                showToast(`删除完成：成功 ${Number(data.deleted_count || 0)} 个，失败 ${Number(data.error_count || 0)} 个`, data.error_count ? 'warning' : 'success');
+                await loadIcloudHmeDeactivationCandidates();
+                await loadIcloudHmeAddresses({ refresh: false, offset: icloudHmeAddressPagination.offset });
+                if (currentGroupId) {
+                    delete accountsCache[currentGroupId];
+                    await loadAccountsByGroup(currentGroupId, true);
+                }
+            } catch (error) {
+                showToast('删除 HME 停用候选失败', 'error');
+            }
+        }
+
+        function ensureIcloudHmeSettingsEvents() {
+            if (icloudHmeSettingsEventsBound) return;
+            const section = document.getElementById('settingsIcloudHmeSection');
+            if (!section) return;
+
+            const subpanels = section.querySelectorAll('.settings-subpanel');
+            const addressButtons = subpanels[1]?.querySelectorAll('.hme-settings-drawer__head .settings-action-row .btn') || [];
+            addressButtons[0]?.addEventListener('click', () => loadIcloudHmeAddresses({ refresh: true, offset: 0 }));
+            addressButtons[1]?.addEventListener('click', () => importSelectedIcloudHmeAddresses());
+
+            const drawer = document.getElementById('icloudHmeAddressDrawer');
+            const loadDrawerOnce = () => {
+                if (drawer?.dataset.loaded === 'true') return;
+                loadIcloudHmeAddresses({ refresh: false, offset: 0 });
+            };
+            drawer?.addEventListener('click', loadDrawerOnce);
+            drawer?.addEventListener('focusin', loadDrawerOnce);
+
+            let addressFilterTimer = null;
+            document.getElementById('icloudHmeAddressSearchInput')?.addEventListener('input', () => {
+                if (drawer?.dataset.loaded !== 'true') return;
+                window.clearTimeout(addressFilterTimer);
+                addressFilterTimer = window.setTimeout(() => loadIcloudHmeAddresses({ refresh: false, offset: 0 }), 250);
+            });
+            ['icloudHmeAddressActiveFilter', 'icloudHmeAddressImportStateFilter', 'icloudHmeAddressGroupFilter'].forEach(id => {
+                document.getElementById(id)?.addEventListener('change', () => {
+                    if (drawer?.dataset.loaded === 'true') {
+                        loadIcloudHmeAddresses({ refresh: false, offset: 0 });
+                    }
+                });
+            });
+
+            const addressBody = document.getElementById('icloudHmeAddressTableBody');
+            addressBody?.addEventListener('change', event => {
+                const checkbox = event.target.closest?.('.icloud-hme-address-checkbox');
+                if (checkbox) {
+                    toggleIcloudHmeAddressSelection(checkbox.dataset.email, checkbox.checked);
+                }
+            });
+            addressBody?.addEventListener('click', event => {
+                const actionEl = event.target.closest?.('[data-action]');
+                if (!actionEl) return;
+                if (actionEl.dataset.action === 'select-address') {
+                    toggleIcloudHmeAddressSelection(actionEl.dataset.email, true);
+                } else if (actionEl.dataset.action === 'import-address') {
+                    importIcloudHmeAddress(actionEl.dataset.email);
+                }
+            });
+
+            const longRunnerButtons = document.getElementById('icloudHmeLongRunnerForm')?.querySelectorAll('button') || [];
+            longRunnerButtons[0]?.addEventListener('click', () => startIcloudHmeLongRunner());
+            longRunnerButtons[1]?.addEventListener('click', () => stopIcloudHmeLongRunner());
+            longRunnerButtons[2]?.addEventListener('click', () => stopIcloudHmeLongRunner());
+
+            const candidateButtons = subpanels[3]?.querySelectorAll('.hme-settings-drawer__head .settings-action-row .btn') || [];
+            candidateButtons[0]?.addEventListener('click', () => scanIcloudHmeDeactivationCandidates());
+            candidateButtons[1]?.addEventListener('click', () => deleteSelectedIcloudHmeCandidates());
+            const candidateBody = document.getElementById('icloudHmeDeactivationCandidateTableBody');
+            candidateBody?.addEventListener('click', event => {
+                const actionEl = event.target.closest?.('[data-action="delete-candidate"]');
+                if (!actionEl) return;
+                document.querySelectorAll('.icloud-hme-candidate-checkbox').forEach(checkbox => {
+                    checkbox.checked = checkbox.dataset.id === actionEl.dataset.id;
+                });
+                deleteSelectedIcloudHmeCandidates();
+            });
+
+            icloudHmeSettingsEventsBound = true;
         }
 
         function resetIcloudHmeSourceForm() {
@@ -885,7 +1549,17 @@
         }
 
         async function openIcloudHmeSourceModal(sourceId = null) {
-            showModal('icloudHmeSourceModal');
+            const settingsSection = document.getElementById('settingsIcloudHmeSection');
+            if (settingsSection) {
+                const settingsModal = document.getElementById('settingsModal');
+                if (!settingsModal?.classList.contains('show')) {
+                    await openIcloudHmeSettings();
+                } else {
+                    scrollSettingsSection('settingsIcloudHmeSection');
+                }
+            } else {
+                showModal('icloudHmeSourceModal');
+            }
             resetIcloudHmeSourceForm();
             const sources = await loadIcloudHmeSources(sourceId || '');
             if (!sourceId) return;
@@ -946,6 +1620,9 @@
                 showToast(data.message || 'iCloud HME 源已保存', 'success');
                 fillIcloudHmeSourceForm(data.source);
                 await loadIcloudHmeSources(data.source?.id || sourceId);
+                if (document.getElementById('icloudHmeAddressDrawer')?.dataset.loaded === 'true') {
+                    await loadIcloudHmeAddresses({ refresh: false, offset: 0 });
+                }
             } catch (error) {
                 showToast('保存 iCloud HME 源失败', 'error');
             }
@@ -1008,6 +1685,9 @@
                 const updated = Number(data.updated_count || 0);
                 showToast(`同步完成：新增 ${imported} 个，更新 ${updated} 个`, 'success');
                 await loadIcloudHmeSources(id);
+                if (document.getElementById('icloudHmeAddressDrawer')?.dataset.loaded === 'true') {
+                    await loadIcloudHmeAddresses({ refresh: false, offset: 0 });
+                }
                 if (currentGroupId) {
                     delete accountsCache[currentGroupId];
                     await loadAccountsByGroup(currentGroupId, true);
