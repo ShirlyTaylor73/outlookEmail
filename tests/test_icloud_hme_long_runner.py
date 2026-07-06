@@ -5,6 +5,7 @@ import sys
 import tempfile
 import time
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 
@@ -17,6 +18,8 @@ if ROOT_DIR not in sys.path:
     sys.path.insert(0, ROOT_DIR)
 
 web_outlook_app = importlib.import_module('web_outlook_app')
+TEMPLATE_PATH = Path(ROOT_DIR) / 'templates' / 'partials' / 'index' / 'dialogs-management.html'
+SETTINGS_JS_PATH = Path(ROOT_DIR) / 'static' / 'js' / 'index' / '07-settings.js'
 
 
 class ICloudHmeLongRunnerTestCase(unittest.TestCase):
@@ -299,6 +302,28 @@ class ICloudHmeLongRunnerTestCase(unittest.TestCase):
 
         self.assertIn(final_task['status'], {'stopping', 'stopped'}, msg=final_task)
         self.assertTrue(final_task['stop_requested'], msg=final_task)
+
+    def test_long_runner_form_exposes_source_and_target_group_selects(self):
+        template = TEMPLATE_PATH.read_text(encoding='utf-8')
+        form_start = template.index('id="icloudHmeLongRunnerForm"')
+        form_end = template.index('</form>', form_start)
+        form_html = template[form_start:form_end]
+
+        self.assertIn('id="icloudHmeLongRunnerSourceId"', form_html)
+        self.assertIn('for="icloudHmeLongRunnerSourceId"', form_html)
+        self.assertIn('<select class="form-select" id="icloudHmeLongRunnerSourceId"', form_html)
+        self.assertIn('id="icloudHmeLongRunnerTargetGroupId"', form_html)
+        self.assertIn('for="icloudHmeLongRunnerTargetGroupId"', form_html)
+        self.assertIn('<select class="form-select" id="icloudHmeLongRunnerTargetGroupId"', form_html)
+
+    def test_long_runner_js_uses_own_source_group_controls_and_pending_buttons(self):
+        settings_js = SETTINGS_JS_PATH.read_text(encoding='utf-8')
+
+        self.assertIn("getValue('icloudHmeLongRunnerSourceId')", settings_js)
+        self.assertIn("getValue('icloudHmeLongRunnerTargetGroupId')", settings_js)
+        self.assertIn("renderIcloudHmeSourceOptions(document.getElementById('icloudHmeLongRunnerSourceId')", settings_js)
+        self.assertIn('renderIcloudHmeLongRunnerGroupOptions', settings_js)
+        self.assertIn("['pending', 'running', 'stopping'].includes(currentStatus)", settings_js)
 
 
 if __name__ == '__main__':

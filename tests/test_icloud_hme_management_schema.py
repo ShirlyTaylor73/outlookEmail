@@ -65,7 +65,7 @@ def test_reset_interrupted_icloud_hme_generation_tasks_marks_incomplete_tasks_st
         INSERT INTO icloud_hme_generation_tasks (status, stop_requested, last_error)
         VALUES (?, 0, '')
         ''',
-        [('running',), ('stopping',)],
+        [('pending',), ('running',), ('stopping',), ('completed',)],
     )
     db.commit()
 
@@ -79,7 +79,11 @@ def test_reset_interrupted_icloud_hme_generation_tasks_marks_incomplete_tasks_st
         '''
     ).fetchall()
 
-    assert [row["status"] for row in rows] == ["stopped", "stopped"]
-    assert [row["stop_requested"] for row in rows] == [1, 1]
-    assert all("interrupted by process restart" in row["last_error"] for row in rows)
-    assert all(row["stopped_at"] for row in rows)
+    interrupted_rows = rows[:3]
+    completed_row = rows[3]
+    assert [row["status"] for row in interrupted_rows] == ["stopped", "stopped", "stopped"]
+    assert [row["stop_requested"] for row in interrupted_rows] == [1, 1, 1]
+    assert all("interrupted by process restart" in row["last_error"] for row in interrupted_rows)
+    assert all(row["stopped_at"] for row in interrupted_rows)
+    assert completed_row["status"] == "completed"
+    assert completed_row["stop_requested"] == 0

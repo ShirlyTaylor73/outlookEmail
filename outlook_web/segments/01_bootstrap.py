@@ -1016,7 +1016,7 @@ def reset_interrupted_icloud_hme_generation_tasks(conn) -> None:
             last_error = 'interrupted by process restart',
             stopped_at = CURRENT_TIMESTAMP,
             updated_at = CURRENT_TIMESTAMP
-        WHERE status IN ('running', 'stopping')
+        WHERE status IN ('pending', 'running', 'stopping')
         """
     )
 

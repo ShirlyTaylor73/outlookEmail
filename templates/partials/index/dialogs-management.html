@@ -762,6 +762,18 @@
                             <form id="icloudHmeLongRunnerForm" onsubmit="event.preventDefault()">
                                 <div class="settings-panel-grid">
                                     <div class="form-group">
+                                        <label class="form-label" for="icloudHmeLongRunnerSourceId">HME 源</label>
+                                        <select class="form-select" id="icloudHmeLongRunnerSourceId">
+                                            <option value="">请选择 HME 源...</option>
+                                        </select>
+                                    </div>
+                                    <div class="form-group">
+                                        <label class="form-label" for="icloudHmeLongRunnerTargetGroupId">目标分组</label>
+                                        <select class="form-select" id="icloudHmeLongRunnerTargetGroupId">
+                                            <option value="">请选择目标分组...</option>
+                                        </select>
+                                    </div>
+                                    <div class="form-group">
                                         <label class="form-label" for="icloudHmeLongRunnerLabelPrefix">Label 前缀</label>
                                         <input type="text" class="form-input" id="icloudHmeLongRunnerLabelPrefix" value="OutlookEmail" placeholder="OutlookEmail">
                                     </div>

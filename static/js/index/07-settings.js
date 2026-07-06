@@ -830,6 +830,7 @@
                 icloudHmeSourcesCache = Array.isArray(data.sources) ? data.sources : [];
                 renderIcloudHmeSourceOptions(document.getElementById('importIcloudHmeSourceSelect'), selectedId);
                 renderIcloudHmeSourceOptions(document.getElementById('editIcloudHmeSourceSelect'), selectedId);
+                renderIcloudHmeSourceOptions(document.getElementById('icloudHmeLongRunnerSourceId'), selectedId);
                 renderIcloudHmeSourceList();
                 renderIcloudHmeGroupOptions();
                 return icloudHmeSourcesCache;
@@ -867,6 +868,29 @@
                 select.value = currentValue;
             } else if (currentGroupId && Array.from(select.options).some(option => option.value === String(currentGroupId))) {
                 select.value = String(currentGroupId);
+            }
+            renderIcloudHmeLongRunnerGroupOptions();
+        }
+
+        function renderIcloudHmeLongRunnerGroupOptions() {
+            const select = document.getElementById('icloudHmeLongRunnerTargetGroupId');
+            if (!select) return;
+            const currentValue = select.value || '';
+            const options = ['<option value="">请选择目标分组...</option>'];
+            getIcloudHmeAccountGroups().forEach(group => {
+                options.push(`<option value="${Number(group.id)}">${escapeHtml(getIcloudHmeGroupLabel(group))}</option>`);
+            });
+            select.innerHTML = options.join('');
+            const hasOption = (value) => Array.from(select.options).some(option => option.value === String(value));
+            if (currentValue && hasOption(currentValue)) {
+                select.value = currentValue;
+            } else if (currentGroupId && hasOption(currentGroupId)) {
+                select.value = String(currentGroupId);
+            } else {
+                const firstGroup = getIcloudHmeAccountGroups()[0];
+                if (firstGroup && hasOption(firstGroup.id)) {
+                    select.value = String(firstGroup.id);
+                }
             }
         }
 
@@ -1154,8 +1178,8 @@
                 const value = parseInt(getValue(id), 10);
                 return Number.isFinite(value) ? value : fallback;
             };
-            const sourceId = getSelectedIcloudHmeSourceId();
-            const groupSelectValue = document.getElementById('icloudHmeAddressGroupFilter')?.value || '';
+            const sourceId = getValue('icloudHmeLongRunnerSourceId') || getSelectedIcloudHmeSourceId();
+            const groupSelectValue = getValue('icloudHmeLongRunnerTargetGroupId');
             const fallbackGroupId = currentGroupId || getIcloudHmeAccountGroups()[0]?.id || '';
             const targetCount = getNumber('icloudHmeLongRunnerTargetCount', 1);
             return {
@@ -1195,8 +1219,8 @@
             const refreshBtn = document.getElementById('icloudHmeLongRunnerRefreshBtn');
             const stopBtn = document.getElementById('icloudHmeLongRunnerStopBtn');
             const active = ['pending', 'running', 'stopping'].includes(currentStatus);
-            const startDisabled = ['running', 'stopping'].includes(currentStatus);
-            const stopEnabled = ['running', 'stopping'].includes(currentStatus);
+            const startDisabled = active;
+            const stopEnabled = active;
             if (statusEl) {
                 const progress = status?.total_requested
                     ? `进度：${Number(status.success_count || 0) + Number(status.failed_count || 0)}/${status.total_requested}`
