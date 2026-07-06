@@ -142,13 +142,8 @@ def post_with_proxy_fallback(url: str, *, proxy_url: str = None,
     )
 
 
-def fetch_icloud_hme_list(cookie: str, region: str = 'global',
-                          maildomain_host: str = '') -> Dict[str, Any]:
-    """调用 iCloud 网页内部 HME list endpoint，返回统一结果结构。"""
-    cookie_value = str(cookie or '').strip()
-    if not cookie_value:
-        return {'success': False, 'error': 'iCloud Cookie 不能为空'}
-
+def build_icloud_hme_request_context(region: str = 'global',
+                                     maildomain_host: str = '') -> tuple[str, str]:
     normalized_region = str(region or '').strip().lower()
     is_china_region = normalized_region == 'china'
     web_origin = 'https://www.icloud.com.cn' if is_china_region else 'https://www.icloud.com'
@@ -156,10 +151,11 @@ def fetch_icloud_hme_list(cookie: str, region: str = 'global',
     raw_host = str(maildomain_host or '').strip()
     if raw_host.lower() in {'maildomain.icloud.com', 'maildomain.icloud.com.cn'}:
         raw_host = ''
-    host = raw_host or default_host
-    endpoint = f'https://{host}/v2/hme/list'
+    return web_origin, raw_host or default_host
 
-    headers = {
+
+def build_icloud_hme_headers(cookie_value: str, web_origin: str) -> Dict[str, str]:
+    return {
         'Accept': 'application/json, text/plain, */*',
         'Cookie': cookie_value,
         'Origin': web_origin,
@@ -170,6 +166,124 @@ def fetch_icloud_hme_list(cookie: str, region: str = 'global',
             'Chrome/126.0.0.0 Safari/537.36'
         ),
     }
+
+
+def request_icloud_hme_api(cookie: str, region: str, maildomain_host: str,
+                           api_version: str, action: str, method: str = 'POST',
+                           payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """调用 iCloud 网页内部 HME action endpoint，返回统一结果结构。"""
+    cookie_value = str(cookie or '').strip()
+    if not cookie_value:
+        return {'success': False, 'error': 'iCloud Cookie 不能为空', 'status_code': 400}
+
+    web_origin, host = build_icloud_hme_request_context(region, maildomain_host)
+    endpoint = f'https://{host}/{api_version}/hme/{action}'
+    headers = build_icloud_hme_headers(cookie_value, web_origin)
+    request_method = str(method or 'POST').strip().upper()
+    body = None
+    if payload is not None:
+        body = json.dumps(payload, ensure_ascii=False).encode('utf-8')
+        headers['Content-Type'] = 'application/json;charset=UTF-8'
+
+    request_obj = urllib.request.Request(endpoint, data=body, headers=headers, method=request_method)
+
+    try:
+        with urllib.request.urlopen(request_obj, timeout=HTTP_REQUEST_TIMEOUT) as response:
+            raw_body = response.read()
+            status_code = getattr(response, 'status', None) or getattr(response, 'code', None) or 200
+    except urllib.error.HTTPError as exc:
+        try:
+            details = exc.read().decode('utf-8', 'replace')
+        except Exception:
+            details = ''
+        return {
+            'success': False,
+            'error': sanitize_error_details(f'iCloud HME {action} 请求失败: HTTP {exc.code} {details}'),
+            'status_code': exc.code,
+        }
+    except Exception as exc:
+        return {
+            'success': False,
+            'error': sanitize_error_details(f'iCloud HME {action} 请求失败: {exc}'),
+            'status_code': 500,
+        }
+
+    try:
+        response_payload = json.loads(raw_body.decode('utf-8', 'replace')) if raw_body else {}
+    except Exception as exc:
+        return {
+            'success': False,
+            'error': sanitize_error_details(f'iCloud HME {action} 响应解析失败: {exc}'),
+            'status_code': status_code,
+        }
+
+    if isinstance(response_payload, dict) and response_payload.get('success') is False:
+        return {
+            'success': False,
+            'error': sanitize_error_details(
+                str(response_payload.get('error') or response_payload.get('message') or f'iCloud HME {action} 请求失败')
+            ),
+            'status_code': status_code,
+        }
+
+    return {'success': True, 'data': response_payload, 'status_code': status_code}
+
+
+def generate_icloud_hme(cookie, region='global', maildomain_host=''):
+    return request_icloud_hme_api(
+        cookie,
+        region,
+        maildomain_host,
+        'v1',
+        'generate',
+        payload={'langCode': 'en-us'},
+    )
+
+
+def reserve_icloud_hme(cookie, region, maildomain_host, email_addr, label, note):
+    return request_icloud_hme_api(
+        cookie,
+        region,
+        maildomain_host,
+        'v1',
+        'reserve',
+        payload={'hme': email_addr, 'label': label, 'note': note},
+    )
+
+
+def deactivate_icloud_hme(cookie, region, maildomain_host, anonymous_id):
+    return request_icloud_hme_api(
+        cookie,
+        region,
+        maildomain_host,
+        'v1',
+        'deactivate',
+        payload={'anonymousId': anonymous_id},
+    )
+
+
+def delete_icloud_hme(cookie, region, maildomain_host, anonymous_id):
+    return request_icloud_hme_api(
+        cookie,
+        region,
+        maildomain_host,
+        'v1',
+        'delete',
+        payload={'anonymousId': anonymous_id},
+    )
+
+
+def fetch_icloud_hme_list(cookie: str, region: str = 'global',
+                          maildomain_host: str = '') -> Dict[str, Any]:
+    """调用 iCloud 网页内部 HME list endpoint，返回统一结果结构。"""
+    cookie_value = str(cookie or '').strip()
+    if not cookie_value:
+        return {'success': False, 'error': 'iCloud Cookie 不能为空'}
+
+    web_origin, host = build_icloud_hme_request_context(region, maildomain_host)
+    endpoint = f'https://{host}/v2/hme/list'
+
+    headers = build_icloud_hme_headers(cookie_value, web_origin)
     request_obj = urllib.request.Request(endpoint, headers=headers, method='GET')
 
     try:
