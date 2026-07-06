@@ -62,10 +62,12 @@ def normalize_hme_address_list_filters(args) -> Dict[str, Any]:
     return {
         'source_id': normalize_source_id(args.get('source_id')),
         'refresh': normalize_bool_arg(args.get('refresh'), False),
-        'keyword': str(args.get('keyword') or '').strip().lower(),
+        'keyword': str(args.get('keyword') or args.get('q') or '').strip().lower(),
         'import_state': str(args.get('import_state') or args.get('state') or '').strip().lower(),
+        'group_id': normalize_int_arg(args.get('group_id')),
         'active': str(args.get('active') or '').strip().lower(),
         'limit': normalize_int_arg(args.get('limit'), 500, 1, 5000),
+        'offset': normalize_int_arg(args.get('offset'), 0, 0, 1000000),
     }
 
 
@@ -303,6 +305,13 @@ def list_icloud_hme_addresses(source_id, filters) -> Dict[str, Any]:
     if import_state in {'imported', 'conflict', 'not_imported'}:
         merged_items = [item for item in merged_items if item['import_state'] == import_state]
 
+    group_id = filters.get('group_id')
+    if group_id and group_id > 0:
+        merged_items = [
+            item for item in merged_items
+            if item.get('group_id') is not None and int(item.get('group_id')) == int(group_id)
+        ]
+
     active = filters.get('active') or ''
     if active in {'1', 'true', 'active'}:
         merged_items = [item for item in merged_items if item['is_active']]
@@ -310,6 +319,7 @@ def list_icloud_hme_addresses(source_id, filters) -> Dict[str, Any]:
         merged_items = [item for item in merged_items if not item['is_active']]
 
     limit = filters.get('limit') or 500
+    offset = filters.get('offset') or 0
     counts = {
         'total': len(items),
         'filtered': len(merged_items),
@@ -317,12 +327,23 @@ def list_icloud_hme_addresses(source_id, filters) -> Dict[str, Any]:
         'conflict': sum(1 for item in merged_items if item['import_state'] == 'conflict'),
         'not_imported': sum(1 for item in merged_items if item['import_state'] == 'not_imported'),
     }
+    summary = {
+        'imported': counts['imported'],
+        'conflict': counts['conflict'],
+        'not_imported': counts['not_imported'],
+    }
 
     return {
         'success': True,
         'source_id': int(source_id),
-        'items': merged_items[:limit],
+        'items': merged_items[offset:offset + limit],
         'counts': counts,
+        'summary': summary,
+        'pagination': {
+            'total': len(merged_items),
+            'limit': limit,
+            'offset': offset,
+        },
         'refresh_error': refresh_error,
     }
 
@@ -344,7 +365,7 @@ def import_icloud_hme_address_selection(source_id, group_id, addresses, remark='
         fields = extract_hme_item_fields(raw_item)
         hme = fields.get('hme') or ''
         if not hme:
-            entry = {'hme': '', 'state': 'error', 'error': 'HME 邮箱格式无效'}
+            entry = {'hme': '', 'state': 'error', 'status': 'error', 'error': 'HME 邮箱格式无效'}
             results.append(entry)
             errors.append(entry)
             continue
@@ -356,6 +377,7 @@ def import_icloud_hme_address_selection(source_id, group_id, addresses, remark='
             entry = {
                 'hme': hme,
                 'state': state,
+                'status': state,
                 'account_id': result.get('account_id'),
             }
             if state == 'updated':
@@ -367,6 +389,7 @@ def import_icloud_hme_address_selection(source_id, group_id, addresses, remark='
             entry = {
                 'hme': hme,
                 'state': 'conflict',
+                'status': 'conflict',
                 'existing_account_id': result.get('existing_account_id'),
                 'existing_source_id': result.get('existing_source_id'),
             }
@@ -376,6 +399,7 @@ def import_icloud_hme_address_selection(source_id, group_id, addresses, remark='
             entry = {
                 'hme': hme,
                 'state': 'error',
+                'status': 'error',
                 'error': sanitize_error_details(str(result.get('error') or '导入失败')),
             }
             results.append(entry)
@@ -422,6 +446,7 @@ def serialize_icloud_hme_generation_task(row) -> Dict[str, Any]:
         'generated_count': int(row['generated_count'] or 0),
         'success_count': int(row['success_count'] or 0),
         'failed_count': int(row['failed_count'] or 0),
+        'failure_count': int(row['failed_count'] or 0),
         'duplicate_count': int(row['duplicate_count'] or 0),
         'stop_requested': bool(row['stop_requested']),
         'last_error': row['last_error'] or '',
@@ -445,24 +470,34 @@ def create_icloud_hme_generation_task(payload) -> Dict[str, Any]:
         raise ValueError(group_error)
 
     total_requested = normalize_int_arg(
-        data.get('total_requested', data.get('count', data.get('total'))),
+        data.get('target_count', data.get('total_requested', data.get('count', data.get('total')))),
         1,
-        1,
+        None,
         10000,
     )
+    if total_requested <= 0:
+        raise ValueError('target_count 必须为正整数')
+
+    success_delay_seconds = normalize_int_arg(data.get('success_delay_seconds'), 3, None, 3600)
+    if success_delay_seconds < 0:
+        raise ValueError('success_delay_seconds 不能为负数')
+    failure_delay_seconds = normalize_int_arg(data.get('failure_delay_seconds'), 10, None, 3600)
+    if failure_delay_seconds < 0:
+        raise ValueError('failure_delay_seconds 不能为负数')
+
     runtime_payload = {
         'source_id': source_id,
         'target_group_id': int(target_group_id),
         'total_requested': total_requested,
         'label_prefix': str(data.get('label_prefix') or data.get('label') or 'OutlookEmail').strip(),
         'note': str(data.get('note') or data.get('remark') or '').strip(),
-        'success_delay_seconds': normalize_int_arg(data.get('success_delay_seconds'), 3, 0, 3600),
-        'failure_delay_seconds': normalize_int_arg(data.get('failure_delay_seconds'), 10, 0, 3600),
+        'success_delay_seconds': success_delay_seconds,
+        'failure_delay_seconds': failure_delay_seconds,
     }
 
     db = get_db()
     if get_running_icloud_hme_generation_task(db):
-        raise RuntimeError('已有 HME 长时注册任务运行中')
+        raise RuntimeError('已有 HME 注册任务正在运行')
 
     cursor = db.execute(
         '''
@@ -808,6 +843,7 @@ def scan_icloud_hme_deactivation_candidates(
         f'''
         SELECT LOWER(r.hme_address) AS hme, MIN(m.subject) AS subject,
                MIN(m.received_at) AS received_at, MIN(a.id) AS account_id,
+               MIN(a.group_id) AS group_id, MIN(g.name) AS group_name,
                MIN(cache.anonymous_id) AS anonymous_id
         FROM icloud_hme_source_messages m
         JOIN icloud_hme_source_message_recipients r ON r.source_message_id = m.id
@@ -815,6 +851,7 @@ def scan_icloud_hme_deactivation_candidates(
           ON LOWER(a.email) = LOWER(r.hme_address)
          AND a.account_type = 'icloud_hme'
          AND a.icloud_hme_source_id = m.source_id
+        LEFT JOIN groups g ON g.id = a.group_id
         LEFT JOIN icloud_hme_address_cache cache
           ON cache.source_id = m.source_id
          AND LOWER(cache.hme) = LOWER(r.hme_address)
@@ -855,6 +892,8 @@ def scan_icloud_hme_deactivation_candidates(
         candidates.append({
             'hme': hme,
             'account_id': row['account_id'],
+            'group_id': row['group_id'],
+            'group_name': row['group_name'] or '',
             'anonymous_id': row['anonymous_id'] or '',
             'reason': reason,
         })
@@ -992,13 +1031,13 @@ def delete_icloud_hme_deactivation_candidates(source_id, candidate_ids):
             db.execute(
                 '''
                 UPDATE icloud_hme_deactivation_candidates
-                SET status = 'error', last_error = ?, updated_at = CURRENT_TIMESTAMP
+                SET status = 'failed', last_error = ?, updated_at = CURRENT_TIMESTAMP
                 WHERE id = ?
                 ''',
                 (error_message, candidate_id),
             )
             db.commit()
-            results.append({'id': candidate_id, 'hme': hme, 'state': 'error', 'error': error_message})
+            results.append({'id': candidate_id, 'hme': hme, 'state': 'failed', 'error': error_message})
             continue
 
         try:
@@ -1075,20 +1114,20 @@ def delete_icloud_hme_deactivation_candidates(source_id, candidate_ids):
             db.execute(
                 '''
                 UPDATE icloud_hme_deactivation_candidates
-                SET status = 'error', last_error = ?, updated_at = CURRENT_TIMESTAMP
+                SET status = 'failed', last_error = ?, updated_at = CURRENT_TIMESTAMP
                 WHERE id = ?
                 ''',
                 (error_message, candidate_id),
             )
             db.commit()
-            results.append({'id': candidate_id, 'hme': hme, 'state': 'error', 'error': error_message})
+            results.append({'id': candidate_id, 'hme': hme, 'state': 'failed', 'error': error_message})
 
     return {
         'success': True,
         'source_id': source_id,
         'results': results,
         'deleted_count': sum(1 for item in results if item.get('state') == 'deleted'),
-        'error_count': sum(1 for item in results if item.get('state') == 'error'),
+        'error_count': sum(1 for item in results if item.get('state') == 'failed'),
     }
 
 
@@ -1158,7 +1197,7 @@ def api_start_icloud_hme_long_runner():
     try:
         with ICLOUD_HME_LONG_RUNNER_LOCK:
             if get_running_icloud_hme_generation_task():
-                return jsonify({'success': False, 'error': '已有 HME 长时注册任务运行中'}), 409
+                return jsonify({'success': False, 'error': '已有 HME 注册任务正在运行'}), 409
             task = create_icloud_hme_generation_task(data)
             ICLOUD_HME_LONG_RUNNER_STOP.clear()
             ICLOUD_HME_LONG_RUNNER_THREAD = threading.Thread(
