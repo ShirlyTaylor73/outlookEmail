@@ -1504,6 +1504,34 @@
             color: #6b7280;
         }
 
+        .hme-import-toolbar {
+            display: flex;
+            align-items: flex-end;
+            gap: 12px;
+            padding: 14px;
+            border: 1px solid #e5e7eb;
+            border-radius: 12px;
+            background: #f8fafc;
+        }
+
+        .hme-import-toolbar .form-group {
+            flex: 1;
+            min-width: 220px;
+            margin-bottom: 0;
+        }
+
+        .hme-import-toolbar small,
+        #icloudHmeLongRunnerTargetGroupId + small {
+            display: block;
+            margin-top: 5px;
+            color: #6b7280;
+            font-size: 12px;
+        }
+
+        .hme-import-toolbar .btn {
+            min-width: 112px;
+        }
+
         .hme-settings-drawer {
             padding: 14px;
             border: 1px solid #e5e7eb;

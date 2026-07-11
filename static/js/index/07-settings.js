@@ -10,6 +10,7 @@
         let icloudHmeSelectedAddresses = new Set();
         let icloudHmeLongRunnerStatus = null;
         let icloudHmeDeactivationCandidates = [];
+        let icloudHmeGroupsCache = [];
         let icloudHmeSettingsEventsBound = false;
         let lastNormalMailRetentionStatus = null;
         let normalMailRetentionStatusPollTimer = null;
@@ -187,7 +188,10 @@
             scrollSettingsSection('settingsGeneralSection');
             populateTimeZoneOptions(getAppTimeZone());
             await loadSettings();
-            await loadIcloudHmeSources();
+            await Promise.all([
+                loadIcloudHmeSources(),
+                loadIcloudHmeGroups()
+            ]);
             await loadIcloudHmeLongRunnerStatus();
             scheduleSettingsSidebarSync();
         }
@@ -841,10 +845,34 @@
         }
 
         function getIcloudHmeAccountGroups() {
+            if (icloudHmeGroupsCache.length) {
+                return icloudHmeGroupsCache;
+            }
             if (typeof getGroupsByMailboxType === 'function') {
                 return getGroupsByMailboxType('account');
             }
-            return Array.isArray(groups) ? groups : [];
+            return Array.isArray(groups)
+                ? groups.filter(group => String(group?.mailbox_type || 'account').toLowerCase() === 'account')
+                : [];
+        }
+
+        async function loadIcloudHmeGroups() {
+            try {
+                const response = await fetch('/api/groups', { cache: 'no-store' });
+                const data = await response.json();
+                if (!response.ok || !data.success) {
+                    throw new Error(data.error || '加载目标分组失败');
+                }
+                icloudHmeGroupsCache = (Array.isArray(data.groups) ? data.groups : [])
+                    .filter(group => String(group?.mailbox_type || 'account').toLowerCase() === 'account');
+                renderIcloudHmeGroupOptions();
+                return icloudHmeGroupsCache;
+            } catch (error) {
+                icloudHmeGroupsCache = [];
+                renderIcloudHmeGroupOptions();
+                showToast(error.message || '加载目标分组失败', 'error');
+                return [];
+            }
         }
 
         function getIcloudHmeGroupLabel(group) {
@@ -856,20 +884,40 @@
         }
 
         function renderIcloudHmeGroupOptions() {
-            const select = document.getElementById('icloudHmeAddressGroupFilter');
+            const accountGroups = getIcloudHmeAccountGroups();
+            const filterSelect = document.getElementById('icloudHmeAddressGroupFilter');
+            if (filterSelect) {
+                const currentValue = filterSelect.value || '';
+                const options = ['<option value="">全部分组</option>'];
+                accountGroups.forEach(group => {
+                    options.push(`<option value="${Number(group.id)}">${escapeHtml(getIcloudHmeGroupLabel(group))}</option>`);
+                });
+                filterSelect.innerHTML = options.join('');
+                if (currentValue && Array.from(filterSelect.options).some(option => option.value === currentValue)) {
+                    filterSelect.value = currentValue;
+                }
+            }
+            renderIcloudHmeImportGroupOptions(accountGroups);
+            renderIcloudHmeLongRunnerGroupOptions();
+        }
+
+        function renderIcloudHmeImportGroupOptions(accountGroups = getIcloudHmeAccountGroups()) {
+            const select = document.getElementById('icloudHmeAddressImportGroupId');
             if (!select) return;
             const currentValue = select.value || '';
-            const options = ['<option value="">全部分组</option>'];
-            getIcloudHmeAccountGroups().forEach(group => {
+            const options = ['<option value="">请选择现有普通邮箱分组...</option>'];
+            accountGroups.forEach(group => {
                 options.push(`<option value="${Number(group.id)}">${escapeHtml(getIcloudHmeGroupLabel(group))}</option>`);
             });
             select.innerHTML = options.join('');
-            if (currentValue && Array.from(select.options).some(option => option.value === currentValue)) {
+            const hasOption = value => Array.from(select.options).some(option => option.value === String(value));
+            if (currentValue && hasOption(currentValue)) {
                 select.value = currentValue;
-            } else if (currentGroupId && Array.from(select.options).some(option => option.value === String(currentGroupId))) {
+            } else if (currentGroupId && hasOption(currentGroupId)) {
                 select.value = String(currentGroupId);
+            } else if (accountGroups[0]) {
+                select.value = String(accountGroups[0].id);
             }
-            renderIcloudHmeLongRunnerGroupOptions();
         }
 
         function renderIcloudHmeLongRunnerGroupOptions() {
@@ -1114,7 +1162,7 @@
 
         async function importSelectedIcloudHmeAddresses() {
             const sourceId = getSelectedIcloudHmeSourceId();
-            const groupId = document.getElementById('icloudHmeAddressGroupFilter')?.value || '';
+            const groupId = document.getElementById('icloudHmeAddressImportGroupId')?.value || '';
             const addresses = Array.from(icloudHmeSelectedAddresses);
             if (!sourceId) {
                 showToast('请先选择 HME 源', 'error');
@@ -1152,6 +1200,7 @@
                 icloudHmeSelectedAddresses.clear();
                 delete accountsCache[groupId];
                 await loadGroups();
+                await loadIcloudHmeGroups();
                 if (currentGroupId) {
                     await loadAccountsByGroup(currentGroupId, true);
                 } else {

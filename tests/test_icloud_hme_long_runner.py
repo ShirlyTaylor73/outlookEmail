@@ -324,6 +324,18 @@ class ICloudHmeLongRunnerTestCase(unittest.TestCase):
         self.assertIn('id="icloudHmeLongRunnerTargetGroupId"', form_html)
         self.assertIn('for="icloudHmeLongRunnerTargetGroupId"', form_html)
         self.assertIn('<select class="form-select" id="icloudHmeLongRunnerTargetGroupId"', form_html)
+        self.assertNotIn('记录本次任务的目标分组', form_html)
+
+    def test_address_import_uses_dedicated_existing_group_select(self):
+        template = TEMPLATE_PATH.read_text(encoding='utf-8')
+        settings_js = SETTINGS_JS_PATH.read_text(encoding='utf-8')
+
+        self.assertIn('id="icloudHmeAddressImportGroupId"', template)
+        self.assertIn('导入到分组', template)
+        self.assertIn('所属分组筛选', template)
+        self.assertIn("document.getElementById('icloudHmeAddressImportGroupId')?.value", settings_js)
+        self.assertIn("fetch('/api/groups', { cache: 'no-store' })", settings_js)
+        self.assertIn('renderIcloudHmeImportGroupOptions', settings_js)
 
     def test_long_runner_js_uses_own_source_group_controls_and_pending_buttons(self):
         settings_js = SETTINGS_JS_PATH.read_text(encoding='utf-8')

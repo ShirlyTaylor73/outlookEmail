@@ -679,7 +679,6 @@
                                 </div>
                                 <div class="settings-action-row">
                                     <button class="btn btn-sm btn-secondary" type="button" id="icloudHmeRefreshAddressesBtn" data-action="refresh-hme-addresses">刷新地址</button>
-                                    <button class="btn btn-sm btn-primary" type="button" id="icloudHmeImportSelectedAddressesBtn" data-action="import-selected-hme-addresses">导入已选</button>
                                 </div>
                             </div>
                             <div class="hme-settings-summary-grid" id="icloudHmeSummaryCards">
@@ -698,6 +697,16 @@
                                     <strong>--</strong>
                                     <small>未导入或需复核</small>
                                 </article>
+                            </div>
+                            <div class="hme-import-toolbar">
+                                <div class="form-group">
+                                    <label class="form-label" for="icloudHmeAddressImportGroupId">导入到分组</label>
+                                    <select class="form-select" id="icloudHmeAddressImportGroupId">
+                                        <option value="">请选择现有普通邮箱分组...</option>
+                                    </select>
+                                    <small>导入时使用所选分组的 Group ID。</small>
+                                </div>
+                                <button class="btn btn-primary" type="button" id="icloudHmeImportSelectedAddressesBtn" data-action="import-selected-hme-addresses">导入已选</button>
                             </div>
                             <div class="hme-settings-drawer" id="icloudHmeAddressDrawer">
                                 <div class="hme-settings-filter-grid">
@@ -723,7 +732,7 @@
                                         </select>
                                     </div>
                                     <div class="form-group">
-                                        <label class="form-label">目标分组</label>
+                                        <label class="form-label">所属分组筛选</label>
                                         <select class="form-select" id="icloudHmeAddressGroupFilter">
                                             <option value="">全部分组</option>
                                         </select>
@@ -772,6 +781,7 @@
                                         <select class="form-select" id="icloudHmeLongRunnerTargetGroupId">
                                             <option value="">请选择目标分组...</option>
                                         </select>
+                                        <small>任务创建的 HME 账号会导入到该 Group ID。</small>
                                     </div>
                                     <div class="form-group">
                                         <label class="form-label" for="icloudHmeLongRunnerLabelPrefix">Label 前缀</label>
@@ -795,7 +805,7 @@
                                     </div>
                                     <div class="form-group settings-form-span-full">
                                         <label class="form-label" for="icloudHmeLongRunnerNote">备注</label>
-                                        <textarea class="form-textarea" id="icloudHmeLongRunnerNote" placeholder="记录本次任务的目标分组、账号来源或限制条件"></textarea>
+                                        <textarea class="form-textarea" id="icloudHmeLongRunnerNote" placeholder="可选：记录账号来源、用途或其他说明"></textarea>
                                     </div>
                                 </div>
                                 <div class="settings-action-row">
