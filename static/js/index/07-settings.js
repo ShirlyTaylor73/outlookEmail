@@ -335,6 +335,22 @@
             }
         }
 
+        function toggleSettingsFullscreen(force = null) {
+            const modal = document.getElementById('settingsModal');
+            const button = document.getElementById('settingsFullscreenToggle');
+            if (!modal) return false;
+            const nextState = typeof force === 'boolean'
+                ? force
+                : !modal.classList.contains('settings-modal--fullscreen');
+            modal.classList.toggle('settings-modal--fullscreen', nextState);
+            if (button) {
+                button.textContent = nextState ? '退出全屏' : '全屏';
+                button.setAttribute('aria-pressed', nextState ? 'true' : 'false');
+            }
+            window.setTimeout(scheduleSettingsSidebarSync, 0);
+            return nextState;
+        }
+
         // 生成随机对外 API Key
         function generateExternalApiKey() {
             const array = new Uint8Array(16);

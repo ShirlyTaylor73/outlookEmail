@@ -386,8 +386,39 @@
             flex: 1 1 auto;
             padding: 24px;
             overflow-y: auto;
+            overflow-x: hidden;
             min-height: 0;
             overscroll-behavior: contain;
+        }
+
+        .settings-modal-header-actions {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .settings-fullscreen-toggle {
+            min-width: 72px;
+        }
+
+        #settingsModal.settings-modal--fullscreen {
+            padding: 0;
+        }
+
+        #settingsModal.settings-modal--fullscreen .settings-modal-content {
+            width: 100vw;
+            max-width: none;
+            height: 100vh;
+            max-height: none;
+            border-radius: 0;
+        }
+
+        #settingsModal.settings-modal--fullscreen .settings-modal-body {
+            padding: 18px;
+        }
+
+        #settingsModal.settings-modal--fullscreen .settings-sidebar {
+            max-height: calc(100vh - 110px);
         }
 
         .settings-modal-content .modal-header,
@@ -400,6 +431,7 @@
             display: grid;
             gap: 24px;
             align-items: start;
+            min-width: 0;
         }
 
         .settings-sidebar {
@@ -501,6 +533,12 @@
             min-width: 0;
         }
 
+        .settings-section,
+        .settings-panel,
+        .settings-subpanel {
+            min-width: 0;
+        }
+
         .settings-section {
             border-top: 1px solid #e5e5e5;
             margin: 24px 0;
@@ -511,6 +549,14 @@
             border-top: none;
             margin-top: 0;
             padding-top: 0;
+        }
+
+        #settingsIcloudHmeSection {
+            display: block;
+        }
+
+        #settingsIcloudHmeSection > .settings-section-head {
+            margin-bottom: 18px;
         }
 
         .settings-section-head {
@@ -1608,8 +1654,35 @@
 
         .hme-settings-table-wrap table {
             width: 100%;
-            min-width: 720px;
+            min-width: 1180px;
             border-collapse: collapse;
+        }
+
+        .hme-settings-table-wrap th:nth-child(1),
+        .hme-settings-table-wrap td:nth-child(1) { width: 44px; }
+        .hme-settings-table-wrap th:nth-child(2),
+        .hme-settings-table-wrap td:nth-child(2) { width: 280px; }
+        .hme-settings-table-wrap th:nth-child(3),
+        .hme-settings-table-wrap td:nth-child(3) { width: 105px; }
+        .hme-settings-table-wrap th:nth-child(4),
+        .hme-settings-table-wrap td:nth-child(4) { width: 130px; }
+        .hme-settings-table-wrap th:nth-child(5),
+        .hme-settings-table-wrap td:nth-child(5) { width: 190px; }
+        .hme-settings-table-wrap th:nth-child(6),
+        .hme-settings-table-wrap td:nth-child(6) { width: 155px; }
+        .hme-settings-table-wrap th:nth-child(7),
+        .hme-settings-table-wrap td:nth-child(7) { width: 190px; }
+        .hme-settings-table-wrap th:nth-child(8),
+        .hme-settings-table-wrap td:nth-child(8) { width: 190px; }
+
+        .hme-settings-table-wrap th,
+        .hme-settings-table-wrap .status-badge,
+        .hme-settings-table-wrap .btn {
+            white-space: nowrap;
+        }
+
+        .hme-settings-table-wrap td {
+            overflow-wrap: anywhere;
         }
 
         .hme-settings-table-wrap th,

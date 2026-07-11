@@ -20,6 +20,7 @@ if ROOT_DIR not in sys.path:
 web_outlook_app = importlib.import_module('web_outlook_app')
 TEMPLATE_PATH = Path(ROOT_DIR) / 'templates' / 'partials' / 'index' / 'dialogs-management.html'
 SETTINGS_JS_PATH = Path(ROOT_DIR) / 'static' / 'js' / 'index' / '07-settings.js'
+SETTINGS_CSS_PATH = Path(ROOT_DIR) / 'static' / 'css' / 'index' / '06-modals-toast.css'
 
 
 class ICloudHmeAddressManagementTestCase(unittest.TestCase):
@@ -323,6 +324,20 @@ class ICloudHmeAddressManagementTestCase(unittest.TestCase):
         self.assertIn('导入到所选分组', settings_js)
         self.assertIn("params.set('group_id', filters.group_id)", settings_js)
         self.assertIn('renderIcloudHmeAddressPagination()', settings_js)
+
+    def test_settings_supports_fullscreen_and_keeps_hme_table_scroll_local(self):
+        template = TEMPLATE_PATH.read_text(encoding='utf-8')
+        settings_js = SETTINGS_JS_PATH.read_text(encoding='utf-8')
+        settings_css = SETTINGS_CSS_PATH.read_text(encoding='utf-8')
+
+        self.assertIn('id="settingsFullscreenToggle"', template)
+        self.assertIn('toggleSettingsFullscreen()', template)
+        self.assertIn('function toggleSettingsFullscreen', settings_js)
+        self.assertIn('settings-modal--fullscreen', settings_js)
+        self.assertIn('#settingsModal.settings-modal--fullscreen .settings-modal-content', settings_css)
+        self.assertIn('#settingsIcloudHmeSection {', settings_css)
+        self.assertIn('overflow-x: hidden', settings_css)
+        self.assertIn('min-width: 1180px', settings_css)
 
 
 if __name__ == '__main__':
