@@ -6,11 +6,16 @@ The format is based on Keep a Changelog, and this project follows Semantic Versi
 
 ## [Unreleased]
 
+## [2.1.0] - 2026-07-12
+
 ### Added
 - 新增系统设置里的 iCloud HME 全局管理分区，集中管理 HME Cookie、接收邮箱和 IMAP 转发配置。
 - 新增 HME 使用中地址列表，可查看导入状态、冲突状态以及已导入账号所属 `group_id`。
 - 新增 HME 长时定时注册任务，支持设置注册数量、成功/失败延迟、开始和中止，并记录生成结果。
 - 新增 OpenAI Access Deactivated 候选扫描和确认删除流程，可批量停用并删除对应 iCloud HME 地址。
+
+### Fixed
+- HME 长时注册 Label 改为按项目时区生成每日连续编号，格式为 `M.D No.X`。
 
 ## [2.0.61] - 2026-07-03
 
