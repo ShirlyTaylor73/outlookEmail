@@ -11,6 +11,7 @@
         let icloudHmeLongRunnerStatus = null;
         let icloudHmeDeactivationCandidates = [];
         let icloudHmeGroupsCache = [];
+        let icloudHmeLongRunnerPollTimer = null;
         let icloudHmeSettingsEventsBound = false;
         let lastNormalMailRetentionStatus = null;
         let normalMailRetentionStatusPollTimer = null;
@@ -203,6 +204,7 @@
 
         // 隐藏设置模态框
         function hideSettingsModal() {
+            stopIcloudHmeLongRunnerPolling();
             hideModal('settingsModal');
             // 清空密码输入框
             const passwordInput = document.getElementById('settingsPassword');
@@ -322,6 +324,10 @@
                 updateSettingsSidebarActive(triggerEl.dataset.target);
             } else {
                 updateSettingsSidebarActive(sectionId);
+            }
+
+            if (sectionId === 'settingsIcloudHmeSection') {
+                void loadIcloudHmeLongRunnerStatus();
             }
         }
 
@@ -1254,11 +1260,35 @@
                 icloudHmeLongRunnerStatus = data.task || { status: 'idle' };
                 renderIcloudHmeLongRunnerStatus(icloudHmeLongRunnerStatus);
                 await loadIcloudHmeLongRunnerLogs();
+                syncIcloudHmeLongRunnerPolling(icloudHmeLongRunnerStatus);
                 return icloudHmeLongRunnerStatus;
             } catch (error) {
                 renderIcloudHmeLongRunnerStatus({ status: 'failed', last_error: error.message });
+                stopIcloudHmeLongRunnerPolling();
                 return null;
             }
+        }
+
+        function isIcloudHmeLongRunnerActive(status = icloudHmeLongRunnerStatus) {
+            return ['pending', 'running', 'stopping'].includes(status?.status || 'idle');
+        }
+
+        function stopIcloudHmeLongRunnerPolling() {
+            if (icloudHmeLongRunnerPollTimer !== null) {
+                window.clearInterval(icloudHmeLongRunnerPollTimer);
+                icloudHmeLongRunnerPollTimer = null;
+            }
+        }
+
+        function syncIcloudHmeLongRunnerPolling(status = icloudHmeLongRunnerStatus) {
+            if (!isIcloudHmeLongRunnerActive(status)) {
+                stopIcloudHmeLongRunnerPolling();
+                return;
+            }
+            if (icloudHmeLongRunnerPollTimer !== null) return;
+            icloudHmeLongRunnerPollTimer = window.setInterval(() => {
+                void loadIcloudHmeLongRunnerStatus();
+            }, 3000);
         }
 
         function renderIcloudHmeLongRunnerStatus(status) {
@@ -1330,6 +1360,7 @@
                 icloudHmeLongRunnerStatus = data.task || { status: 'pending' };
                 renderIcloudHmeLongRunnerStatus(icloudHmeLongRunnerStatus);
                 await loadIcloudHmeLongRunnerLogs();
+                syncIcloudHmeLongRunnerPolling(icloudHmeLongRunnerStatus);
                 showToast('HME 长时注册任务已启动', 'success');
             } catch (error) {
                 showToast('启动 HME 长时注册任务失败', 'error');
@@ -1352,6 +1383,7 @@
                 icloudHmeLongRunnerStatus = data.task || { status: 'stopping' };
                 renderIcloudHmeLongRunnerStatus(icloudHmeLongRunnerStatus);
                 await loadIcloudHmeLongRunnerLogs();
+                syncIcloudHmeLongRunnerPolling(icloudHmeLongRunnerStatus);
                 showToast('已请求停止 HME 长时注册任务', 'success');
             } catch (error) {
                 showToast('停止 HME 长时注册任务失败', 'error');
@@ -1550,7 +1582,6 @@
             bindSectionAction('icloudHmeLongRunnerStartBtn', 'start-long-runner', () => startIcloudHmeLongRunner());
             bindSectionAction('icloudHmeLongRunnerRefreshBtn', 'refresh-long-runner', async () => {
                 await loadIcloudHmeLongRunnerStatus();
-                await loadIcloudHmeLongRunnerLogs();
             });
             bindSectionAction('icloudHmeLongRunnerStopBtn', 'stop-long-runner', () => stopIcloudHmeLongRunner());
 

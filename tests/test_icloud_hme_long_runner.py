@@ -346,6 +346,16 @@ class ICloudHmeLongRunnerTestCase(unittest.TestCase):
         self.assertIn('renderIcloudHmeLongRunnerGroupOptions', settings_js)
         self.assertIn("['pending', 'running', 'stopping'].includes(currentStatus)", settings_js)
 
+    def test_long_runner_logs_refresh_automatically_while_settings_are_open(self):
+        settings_js = SETTINGS_JS_PATH.read_text(encoding='utf-8')
+
+        self.assertIn("sectionId === 'settingsIcloudHmeSection'", settings_js)
+        self.assertIn('void loadIcloudHmeLongRunnerStatus()', settings_js)
+        self.assertIn('syncIcloudHmeLongRunnerPolling(icloudHmeLongRunnerStatus)', settings_js)
+        self.assertIn('window.setInterval(() =>', settings_js)
+        self.assertIn('}, 3000);', settings_js)
+        self.assertIn('stopIcloudHmeLongRunnerPolling();', settings_js)
+
 
 if __name__ == '__main__':
     unittest.main()
