@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import secrets
 import urllib.error
+import urllib.parse
 import urllib.request
 
 from email.utils import getaddresses
@@ -168,6 +169,52 @@ def build_icloud_hme_headers(cookie_value: str, web_origin: str) -> Dict[str, st
     }
 
 
+ICLOUD_HME_CLIENT_PARAMS = {
+    'clientBuildNumber': '2536Project32',
+    'clientMasteringNumber': '2536B20',
+    'clientId': '',
+    'dsid': '',
+}
+
+
+def build_icloud_hme_endpoint(host: str, api_version: str, action: str) -> str:
+    query = urllib.parse.urlencode(ICLOUD_HME_CLIENT_PARAMS)
+    return f'https://{host}/{api_version}/hme/{action}?{query}'
+
+
+def extract_icloud_hme_response_error(payload: Any) -> str:
+    if not isinstance(payload, dict):
+        return ''
+
+    error_payload = payload.get('error')
+    if isinstance(error_payload, dict):
+        error_code = error_payload.get('errorCode') or error_payload.get('code')
+        error_message = error_payload.get('errorMessage') or error_payload.get('message')
+        retry_after = error_payload.get('retryAfter')
+    else:
+        error_code = payload.get('errorCode') or payload.get('code')
+        error_message = payload.get('errorMessage') or payload.get('message')
+        retry_after = payload.get('retryAfter')
+
+    is_error = (
+        payload.get('success') is False
+        or error_code not in (None, '', 0, '0')
+        or bool(error_payload)
+    )
+    if not is_error:
+        return ''
+
+    message = str(error_message or error_payload or 'iCloud HME 请求失败').strip()
+    details = []
+    if error_code not in (None, ''):
+        details.append(f'errorCode {error_code}')
+    if retry_after not in (None, ''):
+        details.append(f'retryAfter {retry_after}s')
+    if details:
+        message = f'{message} ({", ".join(details)})'
+    return sanitize_error_details(message)
+
+
 def request_icloud_hme_api(cookie: str, region: str, maildomain_host: str,
                            api_version: str, action: str, method: str = 'POST',
                            payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -177,7 +224,7 @@ def request_icloud_hme_api(cookie: str, region: str, maildomain_host: str,
         return {'success': False, 'error': 'iCloud Cookie 不能为空', 'status_code': 400}
 
     web_origin, host = build_icloud_hme_request_context(region, maildomain_host)
-    endpoint = f'https://{host}/{api_version}/hme/{action}'
+    endpoint = build_icloud_hme_endpoint(host, api_version, action)
     headers = build_icloud_hme_headers(cookie_value, web_origin)
     request_method = str(method or 'POST').strip().upper()
     body = None
@@ -217,13 +264,17 @@ def request_icloud_hme_api(cookie: str, region: str, maildomain_host: str,
             'status_code': status_code,
         }
 
-    if isinstance(response_payload, dict) and response_payload.get('success') is False:
+    response_error = extract_icloud_hme_response_error(response_payload)
+    if response_error:
         return {
             'success': False,
-            'error': sanitize_error_details(
-                str(response_payload.get('error') or response_payload.get('message') or f'iCloud HME {action} 请求失败')
-            ),
+            'error': response_error,
             'status_code': status_code,
+            'retry_after': (
+                (response_payload.get('error') or {}).get('retryAfter')
+                if isinstance(response_payload.get('error'), dict)
+                else response_payload.get('retryAfter')
+            ),
         }
 
     return {'success': True, 'data': response_payload, 'status_code': status_code}
@@ -281,7 +332,7 @@ def fetch_icloud_hme_list(cookie: str, region: str = 'global',
         return {'success': False, 'error': 'iCloud Cookie 不能为空'}
 
     web_origin, host = build_icloud_hme_request_context(region, maildomain_host)
-    endpoint = f'https://{host}/v2/hme/list'
+    endpoint = build_icloud_hme_endpoint(host, 'v2', 'list')
 
     headers = build_icloud_hme_headers(cookie_value, web_origin)
     request_obj = urllib.request.Request(endpoint, headers=headers, method='GET')
@@ -312,10 +363,11 @@ def fetch_icloud_hme_list(cookie: str, region: str = 'global',
             'error': sanitize_error_details(f'iCloud HME list 响应解析失败: {exc}'),
         }
 
-    if isinstance(payload, dict) and payload.get('success') is False:
+    response_error = extract_icloud_hme_response_error(payload)
+    if response_error:
         return {
             'success': False,
-            'error': str(payload.get('error') or payload.get('message') or 'iCloud HME list 请求失败'),
+            'error': response_error,
         }
 
     hme_emails = []
