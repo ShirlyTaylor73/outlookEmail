@@ -1278,7 +1278,6 @@
                 target_group_id: groupSelectValue || fallbackGroupId,
                 target_count: targetCount,
                 total_requested: targetCount,
-                label_prefix: getValue('icloudHmeLongRunnerLabelPrefix') || 'OutlookEmail',
                 note: getValue('icloudHmeLongRunnerNote'),
                 success_delay_seconds: getNumber('icloudHmeLongRunnerSuccessDelaySeconds', 780),
                 failure_delay_seconds: getNumber('icloudHmeLongRunnerFailureDelaySeconds', 3900),

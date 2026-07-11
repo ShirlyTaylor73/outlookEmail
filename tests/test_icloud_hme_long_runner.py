@@ -5,6 +5,7 @@ import sys
 import tempfile
 import time
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -254,6 +255,52 @@ class ICloudHmeLongRunnerTestCase(unittest.TestCase):
         self.assertEqual(account['provider'], 'icloud_hme')
         self.assertEqual(account['icloud_hme_source_id'], source_id)
 
+    def test_daily_label_uses_app_timezone_and_counts_only_imported_addresses(self):
+        source_id = self._create_source()
+        with self.app.app_context():
+            db = web_outlook_app.get_db()
+            db.executemany(
+                '''
+                INSERT INTO icloud_hme_generated_addresses (
+                    source_id, hme, label, status, created_at
+                )
+                VALUES (?, ?, ?, ?, ?)
+                ''',
+                (
+                    (source_id, 'first@example.com', '7.6 No.1', 'imported', '2026-07-05 16:30:00'),
+                    (source_id, 'failed@example.com', '7.6 No.2', 'error', '2026-07-05 17:00:00'),
+                    (source_id, 'duplicate@example.com', '7.6 No.2', 'duplicate', '2026-07-05 18:00:00'),
+                    (source_id, 'yesterday@example.com', '7.5 No.9', 'imported', '2026-07-05 15:59:59'),
+                ),
+            )
+            db.commit()
+
+            label = web_outlook_app.get_next_icloud_hme_daily_label(
+                db,
+                datetime(2026, 7, 5, 17, 30, tzinfo=timezone.utc),
+            )
+
+        self.assertEqual(label, '7.6 No.2')
+
+    def test_long_runner_reserves_with_daily_sequence_label(self):
+        source_id = self._create_source()
+        with patch.object(web_outlook_app, 'get_next_icloud_hme_daily_label', return_value='7.6 No.3'), \
+                patch.object(web_outlook_app, 'generate_icloud_hme', return_value={
+                    'success': True,
+                    'result': {'hme': 'daily-label@example.com'},
+                }), patch.object(web_outlook_app, 'reserve_icloud_hme', return_value={
+                    'success': True,
+                }) as reserve_mock:
+            response = self.client.post(
+                '/api/icloud-hme/long-runner/start',
+                json=self._start_payload(source_id, label_prefix='IgnoredPrefix'),
+            )
+            data = response.get_json()
+            self.assertEqual(response.status_code, 202, msg=data)
+            self._wait_for_task(data['task']['id'])
+
+        self.assertEqual(reserve_mock.call_args.args[4], '7.6 No.3')
+
     def test_generation_failure_records_counter_log_and_last_error(self):
         source_id = self._create_source()
 
@@ -325,6 +372,9 @@ class ICloudHmeLongRunnerTestCase(unittest.TestCase):
         self.assertIn('for="icloudHmeLongRunnerTargetGroupId"', form_html)
         self.assertIn('<select class="form-select" id="icloudHmeLongRunnerTargetGroupId"', form_html)
         self.assertNotIn('记录本次任务的目标分组', form_html)
+        self.assertNotIn('id="icloudHmeLongRunnerLabelPrefix"', form_html)
+        self.assertIn('Label 自动生成', form_html)
+        self.assertIn('M.D No.X', form_html)
 
     def test_address_import_uses_dedicated_existing_group_select(self):
         template = TEMPLATE_PATH.read_text(encoding='utf-8')
@@ -345,6 +395,7 @@ class ICloudHmeLongRunnerTestCase(unittest.TestCase):
         self.assertIn("renderIcloudHmeSourceOptions(document.getElementById('icloudHmeLongRunnerSourceId')", settings_js)
         self.assertIn('renderIcloudHmeLongRunnerGroupOptions', settings_js)
         self.assertIn("['pending', 'running', 'stopping'].includes(currentStatus)", settings_js)
+        self.assertNotIn("label_prefix: getValue('icloudHmeLongRunnerLabelPrefix')", settings_js)
 
     def test_long_runner_logs_refresh_automatically_while_settings_are_open(self):
         settings_js = SETTINGS_JS_PATH.read_text(encoding='utf-8')

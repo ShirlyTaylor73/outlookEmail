@@ -510,7 +510,6 @@ def create_icloud_hme_generation_task(payload) -> Dict[str, Any]:
         'source_id': source_id,
         'target_group_id': int(target_group_id),
         'total_requested': total_requested,
-        'label_prefix': str(data.get('label_prefix') or data.get('label') or 'OutlookEmail').strip(),
         'note': str(data.get('note') or data.get('remark') or '').strip(),
         'success_delay_seconds': success_delay_seconds,
         'failure_delay_seconds': failure_delay_seconds,
@@ -600,6 +599,34 @@ def update_icloud_hme_task_counter(task_id, **updates):
     db.commit()
 
 
+def get_next_icloud_hme_daily_label(db=None, now=None) -> str:
+    db = db or get_db()
+    app_timezone = get_app_timezone_info()
+    current_time = now or datetime.now(timezone.utc)
+    if current_time.tzinfo is None:
+        current_time = current_time.replace(tzinfo=timezone.utc)
+    local_time = current_time.astimezone(app_timezone)
+    day_start_local = local_time.replace(hour=0, minute=0, second=0, microsecond=0)
+    day_end_local = day_start_local + timedelta(days=1)
+    day_start_utc = day_start_local.astimezone(timezone.utc)
+    day_end_utc = day_end_local.astimezone(timezone.utc)
+    row = db.execute(
+        '''
+        SELECT COUNT(*) AS total
+        FROM icloud_hme_generated_addresses
+        WHERE status = 'imported'
+          AND created_at >= ?
+          AND created_at < ?
+        ''',
+        (
+            day_start_utc.strftime('%Y-%m-%d %H:%M:%S'),
+            day_end_utc.strftime('%Y-%m-%d %H:%M:%S'),
+        ),
+    ).fetchone()
+    next_number = int(row['total'] or 0) + 1
+    return f'{local_time.month}.{local_time.day} No.{next_number}'
+
+
 def run_icloud_hme_generation_task(task_id):
     with app.app_context():
         db = get_db()
@@ -633,7 +660,6 @@ def run_icloud_hme_generation_task(task_id):
 
         total_requested = int(payload.get('total_requested') or task['total_requested'] or 0)
         target_group_id = int(payload.get('target_group_id') or 1)
-        label_prefix = str(payload.get('label_prefix') or 'OutlookEmail').strip() or 'OutlookEmail'
         note = str(payload.get('note') or '').strip()
         success_delay = int(payload.get('success_delay_seconds') or 0)
         failure_delay = int(payload.get('failure_delay_seconds') or 0)
@@ -649,7 +675,7 @@ def run_icloud_hme_generation_task(task_id):
                 break
 
             hme = ''
-            label = f'{label_prefix}-{index}'
+            label = get_next_icloud_hme_daily_label(db)
             try:
                 generate_result = generate_icloud_hme(
                     source.get('cookie') or '',
