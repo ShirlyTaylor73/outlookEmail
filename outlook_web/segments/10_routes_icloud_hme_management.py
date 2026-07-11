@@ -71,6 +71,20 @@ def get_nested_value(payload, paths):
     return None
 
 
+def normalize_icloud_hme_created_at(value):
+    if value in (None, ''):
+        return None
+    if isinstance(value, (int, float)) or str(value).strip().replace('.', '', 1).isdigit():
+        timestamp = float(value)
+        if timestamp > 100000000000:
+            timestamp /= 1000
+        try:
+            return datetime.fromtimestamp(timestamp, timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+        except (OverflowError, OSError, ValueError):
+            return None
+    return str(value).strip() or None
+
+
 def extract_hme_item_fields(item) -> Dict[str, Any]:
     if isinstance(item, str):
         hme = normalize_hme_address(item)
@@ -80,6 +94,7 @@ def extract_hme_item_fields(item) -> Dict[str, Any]:
             'note': '',
             'is_active': True,
             'anonymous_id': '',
+            'icloud_created_at': None,
         }
 
     if not isinstance(item, dict):
@@ -89,6 +104,7 @@ def extract_hme_item_fields(item) -> Dict[str, Any]:
             'note': '',
             'is_active': False,
             'anonymous_id': '',
+            'icloud_created_at': None,
         }
 
     hme = normalize_hme_address(get_nested_value(item, [
@@ -114,6 +130,12 @@ def extract_hme_item_fields(item) -> Dict[str, Any]:
             or item.get('id')
             or ''
         ).strip(),
+        'icloud_created_at': normalize_icloud_hme_created_at(
+            item.get('createTimestamp')
+            or item.get('createdTimestamp')
+            or item.get('createdAt')
+            or item.get('createTime')
+        ),
     }
 
 
@@ -134,6 +156,7 @@ def upsert_icloud_hme_address_cache(source_id, hme_items) -> None:
             fields.get('note') or '',
             'active' if fields.get('is_active') else 'inactive',
             fields.get('anonymous_id') or '',
+            fields.get('icloud_created_at'),
         ))
 
     if not rows:
@@ -142,14 +165,16 @@ def upsert_icloud_hme_address_cache(source_id, hme_items) -> None:
     db.executemany(
         '''
         INSERT INTO icloud_hme_address_cache (
-            source_id, hme, label, note, status, anonymous_id, last_seen_at, updated_at
+            source_id, hme, label, note, status, anonymous_id, icloud_created_at,
+            last_seen_at, updated_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+        VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
         ON CONFLICT(source_id, hme) DO UPDATE SET
             label = excluded.label,
             note = excluded.note,
             status = excluded.status,
             anonymous_id = excluded.anonymous_id,
+            icloud_created_at = COALESCE(excluded.icloud_created_at, icloud_hme_address_cache.icloud_created_at),
             last_seen_at = CURRENT_TIMESTAMP,
             updated_at = CURRENT_TIMESTAMP
         ''',
@@ -162,7 +187,8 @@ def load_cached_icloud_hme_addresses(source_id) -> List[Dict[str, Any]]:
     db = get_db()
     rows = db.execute(
         '''
-        SELECT hme, label, note, status, anonymous_id, last_seen_at, created_at, updated_at
+        SELECT hme, label, note, status, anonymous_id, icloud_created_at,
+               last_seen_at, created_at, updated_at
         FROM icloud_hme_address_cache
         WHERE source_id = ?
         ORDER BY updated_at DESC, id DESC
@@ -176,6 +202,7 @@ def load_cached_icloud_hme_addresses(source_id) -> List[Dict[str, Any]]:
             'note': row['note'] or '',
             'is_active': (row['status'] or 'active') == 'active',
             'anonymous_id': row['anonymous_id'] or '',
+            'icloud_created_at': row['icloud_created_at'],
             'last_seen_at': row['last_seen_at'],
             'created_at': row['created_at'],
             'updated_at': row['updated_at'],
@@ -200,6 +227,8 @@ def build_icloud_hme_import_status_map(source_id, addresses) -> Dict[str, Dict[s
             'group_name': None,
             'import_state': 'not_imported',
             'conflict': False,
+            'existing_source_id': None,
+            'existing_account_type': '',
         }
         for address in normalized_addresses
     }
@@ -233,6 +262,8 @@ def build_icloud_hme_import_status_map(source_id, addresses) -> Dict[str, Dict[s
                 'group_name': row['group_name'] or '',
                 'import_state': 'imported' if same_source else 'conflict',
                 'conflict': not same_source,
+                'existing_source_id': existing_source_id,
+                'existing_account_type': row['account_type'] or row['provider'] or '',
             }
     return status_map
 
@@ -269,6 +300,12 @@ def list_icloud_hme_addresses(source_id, filters) -> Dict[str, Any]:
             'group_name': state.get('group_name') or '',
             'import_state': state.get('import_state') or 'not_imported',
             'conflict': bool(state.get('conflict')),
+            'existing_source_id': state.get('existing_source_id'),
+            'existing_account_type': state.get('existing_account_type') or '',
+            'note': item.get('note') or '',
+            'created_at': item.get('icloud_created_at') or item.get('created_at'),
+            'last_seen_at': item.get('last_seen_at'),
+            'updated_at': item.get('updated_at'),
         }
         merged_items.append(merged)
 
@@ -276,7 +313,11 @@ def list_icloud_hme_addresses(source_id, filters) -> Dict[str, Any]:
     if keyword:
         merged_items = [
             item for item in merged_items
-            if keyword in item['hme'].lower() or keyword in (item.get('label') or '').lower()
+            if keyword in item['hme'].lower()
+            or keyword in (item.get('label') or '').lower()
+            or keyword in (item.get('note') or '').lower()
+            or keyword in (item.get('anonymous_id') or '').lower()
+            or keyword in (item.get('group_name') or '').lower()
         ]
 
     import_state = filters.get('import_state') or ''
@@ -304,6 +345,8 @@ def list_icloud_hme_addresses(source_id, filters) -> Dict[str, Any]:
         'imported': sum(1 for item in merged_items if item['import_state'] == 'imported'),
         'conflict': sum(1 for item in merged_items if item['import_state'] == 'conflict'),
         'not_imported': sum(1 for item in merged_items if item['import_state'] == 'not_imported'),
+        'active': sum(1 for item in merged_items if item['is_active']),
+        'inactive': sum(1 for item in merged_items if not item['is_active']),
     }
     summary = {
         'imported': counts['imported'],

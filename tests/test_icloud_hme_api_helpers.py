@@ -151,6 +151,23 @@ class ICloudHmeApiHelperTestCase(unittest.TestCase):
             'Cannot connect to iCloud (errorCode -41017, retryAfter 2s)',
         )
 
+    def test_fetch_icloud_hme_list_reads_result_hme_emails(self):
+        hme_items = [{
+            'hme': 'listed@icloud.com',
+            'label': 'Listed',
+            'isActive': True,
+            'createTimestamp': 1783814400000,
+        }]
+        with patch.object(
+            web_outlook_app.urllib.request,
+            'urlopen',
+            return_value=ResponseStub({'success': True, 'result': {'hmeEmails': hme_items}}),
+        ):
+            result = web_outlook_app.fetch_icloud_hme_list('cookie=value', 'global', '')
+
+        self.assertTrue(result['success'], msg=result)
+        self.assertEqual(result['hmeEmails'], hme_items)
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -700,6 +700,13 @@
                             </div>
                             <div class="hme-import-toolbar">
                                 <div class="form-group">
+                                    <label class="form-label" for="icloudHmeAddressSourceId">HME 源</label>
+                                    <select class="form-select" id="icloudHmeAddressSourceId">
+                                        <option value="">请选择 HME 源...</option>
+                                    </select>
+                                    <small>查看该源在 iCloud 中的全部 HME 地址。</small>
+                                </div>
+                                <div class="form-group">
                                     <label class="form-label" for="icloudHmeAddressImportGroupId">导入到分组</label>
                                     <select class="form-select" id="icloudHmeAddressImportGroupId">
                                         <option value="">请选择现有普通邮箱分组...</option>
@@ -742,20 +749,29 @@
                                     <table class="data-table">
                                         <thead>
                                             <tr>
-                                                <th>地址</th>
-                                                <th>状态</th>
-                                                <th>导入</th>
-                                                <th>分组</th>
-                                                <th>最近同步</th>
+                                                <th><input type="checkbox" id="icloudHmeAddressSelectAll" aria-label="选择当前页全部未导入地址"></th>
+                                                <th>HME 地址</th>
+                                                <th>iCloud 状态</th>
+                                                <th>导入状态</th>
+                                                <th>导入分组</th>
+                                                <th>创建时间</th>
+                                                <th>anonymousId</th>
                                                 <th>操作</th>
                                             </tr>
                                         </thead>
                                         <tbody id="icloudHmeAddressTableBody">
                                             <tr>
-                                                <td colspan="6">等待加载 HME 地址...</td>
+                                                <td colspan="8">等待加载 HME 地址...</td>
                                             </tr>
                                         </tbody>
                                     </table>
+                                </div>
+                                <div class="hme-address-pagination">
+                                    <span id="icloudHmeAddressPaginationInfo">显示 0-0 / 0</span>
+                                    <div class="settings-action-row">
+                                        <button class="btn btn-sm btn-secondary" type="button" id="icloudHmeAddressPrevBtn">上一页</button>
+                                        <button class="btn btn-sm btn-secondary" type="button" id="icloudHmeAddressNextBtn">下一页</button>
+                                    </div>
                                 </div>
                             </div>
                         </section>

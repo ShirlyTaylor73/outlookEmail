@@ -1505,7 +1505,8 @@
         }
 
         .hme-import-toolbar {
-            display: flex;
+            display: grid;
+            grid-template-columns: minmax(220px, 1fr) minmax(220px, 1fr) auto;
             align-items: flex-end;
             gap: 12px;
             padding: 14px;
@@ -1515,7 +1516,6 @@
         }
 
         .hme-import-toolbar .form-group {
-            flex: 1;
             min-width: 220px;
             margin-bottom: 0;
         }
@@ -1530,6 +1530,32 @@
 
         .hme-import-toolbar .btn {
             min-width: 112px;
+        }
+
+        .hme-address-main {
+            display: grid;
+            gap: 4px;
+        }
+
+        .hme-address-main strong {
+            color: #111827;
+        }
+
+        .hme-address-main small,
+        .hme-address-meta {
+            display: block;
+            color: #6b7280;
+            font-size: 12px;
+            line-height: 1.45;
+        }
+
+        .hme-address-pagination {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 12px;
+            color: #6b7280;
+            font-size: 12px;
         }
 
         .hme-settings-drawer {
@@ -1810,6 +1836,7 @@
             .settings-choice-row,
             .hme-settings-summary-grid,
             .hme-settings-filter-grid,
+            .hme-import-toolbar,
             .forward-channel-picker,
             .forward-grid {
                 grid-template-columns: 1fr;
@@ -1818,6 +1845,11 @@
             .settings-inline-action {
                 flex-direction: column;
                 align-items: stretch;
+            }
+
+            .hme-address-pagination {
+                align-items: stretch;
+                flex-direction: column;
             }
 
             .hme-source-layout {

@@ -1028,6 +1028,8 @@ def migrate_icloud_hme_management_columns(conn) -> None:
     }
     if address_columns and 'anonymous_id' not in address_columns:
         conn.execute("ALTER TABLE icloud_hme_address_cache ADD COLUMN anonymous_id TEXT DEFAULT ''")
+    if address_columns and 'icloud_created_at' not in address_columns:
+        conn.execute('ALTER TABLE icloud_hme_address_cache ADD COLUMN icloud_created_at TIMESTAMP')
 
     candidate_columns = {
         row[1]
@@ -1179,6 +1181,7 @@ def init_db():
             note TEXT DEFAULT '',
             status TEXT NOT NULL DEFAULT 'active',
             anonymous_id TEXT DEFAULT '',
+            icloud_created_at TIMESTAMP,
             last_seen_at TIMESTAMP,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,

@@ -4,6 +4,7 @@ import sqlite3
 import sys
 import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 
@@ -17,6 +18,8 @@ if ROOT_DIR not in sys.path:
     sys.path.insert(0, ROOT_DIR)
 
 web_outlook_app = importlib.import_module('web_outlook_app')
+TEMPLATE_PATH = Path(ROOT_DIR) / 'templates' / 'partials' / 'index' / 'dialogs-management.html'
+SETTINGS_JS_PATH = Path(ROOT_DIR) / 'static' / 'js' / 'index' / '07-settings.js'
 
 
 class ICloudHmeAddressManagementTestCase(unittest.TestCase):
@@ -115,7 +118,14 @@ class ICloudHmeAddressManagementTestCase(unittest.TestCase):
         return {
             'success': True,
             'hmeEmails': [
-                {'hme': 'imported@icloud.com', 'label': 'Imported Label', 'isActive': True},
+                {
+                    'hme': 'imported@icloud.com',
+                    'label': 'Imported Label',
+                    'note': 'Imported Note',
+                    'isActive': True,
+                    'anonymousId': 'anon-imported',
+                    'createTimestamp': 1783814400000,
+                },
                 {'hme': 'not-imported@icloud.com', 'label': 'Not Imported Label', 'isActive': True},
                 {'hme': 'conflict@icloud.com', 'label': 'Conflict Label', 'isActive': True},
                 {'hme': 'inactive@icloud.com', 'label': 'Inactive Label', 'isActive': False},
@@ -156,6 +166,9 @@ class ICloudHmeAddressManagementTestCase(unittest.TestCase):
         imported_item = next(item for item in data['items'] if item['hme'] == 'imported@icloud.com')
         self.assertEqual(imported_item['group_id'], imported_group_id)
         self.assertEqual(imported_item['group_name'], imported_group_name)
+        self.assertEqual(imported_item['note'], 'Imported Note')
+        self.assertEqual(imported_item['anonymous_id'], 'anon-imported')
+        self.assertEqual(imported_item['created_at'], '2026-07-12T00:00:00Z')
 
         serialized = response.get_data(as_text=True)
         self.assertNotIn('cookie', serialized.lower())
@@ -267,6 +280,49 @@ class ICloudHmeAddressManagementTestCase(unittest.TestCase):
                 self.assertEqual(row['group_id'], group_id)
                 self.assertEqual(row['remark'], 'from address list')
                 self.assertEqual(row['icloud_hme_source_id'], source_id)
+
+    def test_address_list_paginates_and_filters_groups_server_side(self):
+        source_id = self._create_source()
+        group_id = self._create_group('Paged Imported')
+        self._import_hme_account(source_id, group_id, 'page-2@icloud.com')
+        fetch_payload = {
+            'success': True,
+            'hmeEmails': [
+                {'hme': 'page-1@icloud.com', 'isActive': True},
+                {'hme': 'page-2@icloud.com', 'isActive': True},
+                {'hme': 'page-3@icloud.com', 'isActive': False},
+            ],
+        }
+        with patch.object(web_outlook_app, 'fetch_icloud_hme_list', return_value=fetch_payload):
+            self.client.get(f'/api/icloud-hme/addresses?source_id={source_id}&refresh=1&active=all')
+
+        page_response = self.client.get(
+            f'/api/icloud-hme/addresses?source_id={source_id}&active=all&limit=1&offset=1'
+        )
+        page_data = page_response.get_json()
+        self.assertEqual(page_response.status_code, 200, msg=page_data)
+        self.assertEqual(page_data['pagination']['total'], 3)
+        self.assertEqual(len(page_data['items']), 1)
+
+        group_response = self.client.get(
+            f'/api/icloud-hme/addresses?source_id={source_id}&active=all&group_id={group_id}'
+        )
+        group_data = group_response.get_json()
+        self.assertEqual(group_response.status_code, 200, msg=group_data)
+        self.assertEqual([item['hme'] for item in group_data['items']], ['page-2@icloud.com'])
+
+    def test_address_manager_frontend_exposes_source_status_group_and_row_import(self):
+        template = TEMPLATE_PATH.read_text(encoding='utf-8')
+        settings_js = SETTINGS_JS_PATH.read_text(encoding='utf-8')
+
+        self.assertIn('id="icloudHmeAddressSourceId"', template)
+        self.assertIn('id="icloudHmeAddressSelectAll"', template)
+        self.assertIn('创建时间', template)
+        self.assertIn('anonymousId', template)
+        self.assertIn('id="icloudHmeAddressPaginationInfo"', template)
+        self.assertIn('导入到所选分组', settings_js)
+        self.assertIn("params.set('group_id', filters.group_id)", settings_js)
+        self.assertIn('renderIcloudHmeAddressPagination()', settings_js)
 
 
 if __name__ == '__main__':

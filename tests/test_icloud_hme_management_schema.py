@@ -55,6 +55,7 @@ def test_icloud_hme_management_tables_include_runtime_columns(client):
     }
 
     assert "anonymous_id" in address_columns
+    assert "icloud_created_at" in address_columns
     assert "deleted_at" in candidate_columns
 
 

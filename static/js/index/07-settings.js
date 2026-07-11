@@ -328,6 +328,10 @@
 
             if (sectionId === 'settingsIcloudHmeSection') {
                 void loadIcloudHmeLongRunnerStatus();
+                const addressDrawer = document.getElementById('icloudHmeAddressDrawer');
+                if (addressDrawer?.dataset.loaded !== 'true') {
+                    void loadIcloudHmeAddresses({ refresh: true, offset: 0 });
+                }
             }
         }
 
@@ -841,6 +845,11 @@
                 renderIcloudHmeSourceOptions(document.getElementById('importIcloudHmeSourceSelect'), selectedId);
                 renderIcloudHmeSourceOptions(document.getElementById('editIcloudHmeSourceSelect'), selectedId);
                 renderIcloudHmeSourceOptions(document.getElementById('icloudHmeLongRunnerSourceId'), selectedId);
+                const addressSourceSelect = document.getElementById('icloudHmeAddressSourceId');
+                renderIcloudHmeSourceOptions(addressSourceSelect, selectedId);
+                if (addressSourceSelect && !addressSourceSelect.value && icloudHmeSourcesCache.length) {
+                    addressSourceSelect.value = String(icloudHmeSourcesCache[0].id);
+                }
                 renderIcloudHmeSourceList();
                 renderIcloudHmeGroupOptions();
                 return icloudHmeSourcesCache;
@@ -949,6 +958,8 @@
         }
 
         function getSelectedIcloudHmeSourceId({ allowFallback = true } = {}) {
+            const addressSourceId = document.getElementById('icloudHmeAddressSourceId')?.value || '';
+            if (addressSourceId) return addressSourceId;
             const formSourceId = document.getElementById('icloudHmeSourceId')?.value || '';
             if (formSourceId) return formSourceId;
             const importSourceId = document.getElementById('importIcloudHmeSourceSelect')?.value || '';
@@ -990,16 +1001,18 @@
             const pageLimit = icloudHmeAddressPagination.limit || 50;
             const params = new URLSearchParams({
                 source_id: filters.source_id,
-                limit: String(safeOffset + pageLimit),
+                limit: String(pageLimit),
+                offset: String(safeOffset),
                 refresh: refresh ? 'true' : 'false'
             });
             if (filters.keyword) params.set('keyword', filters.keyword);
             if (filters.active) params.set('active', filters.active);
             if (filters.import_state) params.set('import_state', filters.import_state);
+            if (filters.group_id) params.set('group_id', filters.group_id);
 
             const bodyEl = document.getElementById('icloudHmeAddressTableBody');
             if (bodyEl) {
-                bodyEl.innerHTML = '<tr><td colspan="6">正在加载 HME 地址...</td></tr>';
+                bodyEl.innerHTML = '<tr><td colspan="8">正在加载 HME 地址...</td></tr>';
             }
 
             try {
@@ -1009,30 +1022,27 @@
                     throw new Error(data.error || '加载 iCloud HME 地址失败');
                 }
 
-                const allItems = Array.isArray(data.items) ? data.items : [];
-                const groupFilteredItems = filters.group_id
-                    ? allItems.filter(item => !item.group_id || String(item.group_id || '') === String(filters.group_id))
-                    : allItems;
-                const pageItems = groupFilteredItems.slice(safeOffset, safeOffset + pageLimit);
+                const pageItems = Array.isArray(data.items) ? data.items : [];
                 const counts = data.counts || {};
-                icloudHmeAddressCache = groupFilteredItems;
+                icloudHmeAddressCache = pageItems;
                 icloudHmeAddressPagination = {
                     limit: pageLimit,
                     offset: safeOffset,
-                    total: filters.group_id ? groupFilteredItems.length : Number(counts.filtered ?? groupFilteredItems.length)
+                    total: Number(data.pagination?.total ?? counts.filtered ?? pageItems.length)
                 };
-                const visibleEmails = new Set(groupFilteredItems.map(item => item.hme));
+                const visibleEmails = new Set(pageItems.map(item => item.hme));
                 icloudHmeSelectedAddresses = new Set(
                     Array.from(icloudHmeSelectedAddresses).filter(email => visibleEmails.has(email))
                 );
                 document.getElementById('icloudHmeAddressDrawer')?.setAttribute('data-loaded', 'true');
                 renderIcloudHmeAddressSummary({
                     ...counts,
-                    total: filters.group_id ? groupFilteredItems.length : counts.total,
+                    total: counts.total,
                     filtered: icloudHmeAddressPagination.total,
-                    active: groupFilteredItems.filter(item => item.is_active).length
+                    active: counts.active
                 });
                 renderIcloudHmeAddressList(pageItems);
+                renderIcloudHmeAddressPagination();
                 if (data.refresh_error) {
                     showToast(data.refresh_error, 'warning');
                 }
@@ -1082,10 +1092,7 @@
         function renderIcloudHmeAddressImportCell(item) {
             const state = item.import_state || 'not_imported';
             if (state === 'imported') {
-                const groupText = item.group_id
-                    ? `Group ID ${item.group_id}${item.group_name ? ` / ${item.group_name}` : ''}`
-                    : '已导入';
-                return `<span class="status-badge success">已导入</span><small>${escapeHtml(groupText)}</small>`;
+                return '<span class="status-badge success">已导入</span>';
             }
             if (state === 'conflict' || item.conflict) {
                 const details = [
@@ -1094,49 +1101,62 @@
                 ].filter(Boolean).join(' / ') || 'existing account/source';
                 return `<span class="status-badge warning">冲突</span><small>${escapeHtml(details)}</small>`;
             }
-            return `<span class="status-badge">未导入</span>
-                <button class="btn btn-sm btn-primary" type="button" data-action="import-address" data-email="${escapeHtml(item.hme)}">导入</button>`;
+            return '<span class="status-badge">未导入</span>';
         }
 
         function renderIcloudHmeAddressList(addresses) {
             const bodyEl = document.getElementById('icloudHmeAddressTableBody');
             if (!bodyEl) return;
             if (!Array.isArray(addresses) || !addresses.length) {
-                bodyEl.innerHTML = '<tr><td colspan="6">暂无 HME 地址，请先同步或刷新地址。</td></tr>';
+                bodyEl.innerHTML = '<tr><td colspan="8">暂无 HME 地址，请选择 HME 源并刷新地址。</td></tr>';
                 return;
             }
 
             bodyEl.innerHTML = addresses.map(item => {
                 const email = item.hme || '';
                 const checked = icloudHmeSelectedAddresses.has(email) ? 'checked' : '';
+                const importable = (item.import_state || 'not_imported') === 'not_imported' && !item.conflict;
                 const groupText = item.group_id
                     ? `Group ID ${item.group_id}${item.group_name ? ` / ${item.group_name}` : ''}`
-                    : '未导入';
-                const anonymousId = item.anonymous_id
-                    ? `<small>anonymousId: ${escapeHtml(item.anonymous_id)}</small>`
-                    : '';
+                    : (item.conflict ? '已被其他账号占用' : '--');
+                const action = item.import_state === 'imported'
+                    ? '<button class="btn btn-sm btn-secondary" type="button" disabled>已导入</button>'
+                    : item.conflict
+                        ? '<button class="btn btn-sm btn-secondary" type="button" disabled>冲突</button>'
+                        : `<button class="btn btn-sm btn-primary" type="button" data-action="import-address" data-email="${escapeHtml(email)}">导入到所选分组</button>`;
                 return `
                     <tr>
+                        <td><input type="checkbox" class="icloud-hme-address-checkbox" data-email="${escapeHtml(email)}" ${checked} ${importable ? '' : 'disabled'}></td>
                         <td>
-                            <label class="checkbox-label">
-                                <input type="checkbox" class="icloud-hme-address-checkbox" data-email="${escapeHtml(email)}" ${checked}>
-                                <span>
-                                    <strong>${escapeHtml(email)}</strong>
-                                    ${item.label ? `<small>${escapeHtml(item.label)}</small>` : ''}
-                                    ${anonymousId}
-                                </span>
-                            </label>
+                            <div class="hme-address-main">
+                                <strong>${escapeHtml(email)}</strong>
+                                ${item.label ? `<small>Label: ${escapeHtml(item.label)}</small>` : ''}
+                                ${item.note ? `<small>备注: ${escapeHtml(item.note)}</small>` : ''}
+                            </div>
                         </td>
-                        <td>${item.is_active ? '<span class="status-badge success">启用</span>' : '<span class="status-badge">停用</span>'}</td>
+                        <td>${item.is_active ? '<span class="status-badge success">使用中</span>' : '<span class="status-badge">已停用</span>'}</td>
                         <td>${renderIcloudHmeAddressImportCell(item)}</td>
-                        <td>${escapeHtml(groupText)}</td>
-                        <td>${escapeHtml(formatIcloudHmeTimestamp(item.updated_at || item.last_seen_at || item.created_at))}</td>
-                        <td>
-                            <button class="btn btn-sm btn-secondary" type="button" data-action="select-address" data-email="${escapeHtml(email)}">选择</button>
-                        </td>
+                        <td>${item.group_id ? `<span class="hme-group-badge">${escapeHtml(groupText)}</span>` : `<span class="hme-address-meta">${escapeHtml(groupText)}</span>`}</td>
+                        <td>${escapeHtml(formatIcloudHmeTimestamp(item.created_at))}</td>
+                        <td class="mono">${escapeHtml(item.anonymous_id || '--')}</td>
+                        <td>${action}</td>
                     </tr>
                 `;
             }).join('');
+            const selectAll = document.getElementById('icloudHmeAddressSelectAll');
+            if (selectAll) selectAll.checked = false;
+        }
+
+        function renderIcloudHmeAddressPagination() {
+            const { offset, limit, total } = icloudHmeAddressPagination;
+            const start = total ? offset + 1 : 0;
+            const end = Math.min(offset + limit, total);
+            const info = document.getElementById('icloudHmeAddressPaginationInfo');
+            if (info) info.textContent = `显示 ${start}-${end} / ${total}`;
+            const prevBtn = document.getElementById('icloudHmeAddressPrevBtn');
+            const nextBtn = document.getElementById('icloudHmeAddressNextBtn');
+            if (prevBtn) prevBtn.disabled = offset <= 0;
+            if (nextBtn) nextBtn.disabled = offset + limit >= total;
         }
 
         function escapeCssAttributeValue(value) {
@@ -1160,7 +1180,7 @@
         }
 
         function toggleAllIcloudHmeAddressSelection(checked) {
-            document.querySelectorAll('.icloud-hme-address-checkbox').forEach(checkbox => {
+            document.querySelectorAll('.icloud-hme-address-checkbox:not(:disabled)').forEach(checkbox => {
                 checkbox.checked = !!checked;
                 toggleIcloudHmeAddressSelection(checkbox.dataset.email, !!checked);
             });
@@ -1543,7 +1563,7 @@
             const drawer = document.getElementById('icloudHmeAddressDrawer');
             const loadDrawerOnce = () => {
                 if (drawer?.dataset.loaded === 'true') return;
-                loadIcloudHmeAddresses({ refresh: false, offset: 0 });
+                loadIcloudHmeAddresses({ refresh: true, offset: 0 });
             };
             drawer?.addEventListener('click', loadDrawerOnce);
             drawer?.addEventListener('focusin', loadDrawerOnce);
@@ -1554,6 +1574,12 @@
                 window.clearTimeout(addressFilterTimer);
                 addressFilterTimer = window.setTimeout(() => loadIcloudHmeAddresses({ refresh: false, offset: 0 }), 250);
             });
+            document.getElementById('icloudHmeAddressSourceId')?.addEventListener('change', () => {
+                icloudHmeAddressCache = [];
+                icloudHmeSelectedAddresses.clear();
+                if (drawer) drawer.dataset.loaded = 'false';
+                loadIcloudHmeAddresses({ refresh: true, offset: 0 });
+            });
             ['icloudHmeAddressActiveFilter', 'icloudHmeAddressImportStateFilter', 'icloudHmeAddressGroupFilter'].forEach(id => {
                 document.getElementById(id)?.addEventListener('change', () => {
                     if (drawer?.dataset.loaded === 'true') {
@@ -1563,6 +1589,19 @@
             });
 
             const addressBody = document.getElementById('icloudHmeAddressTableBody');
+            document.getElementById('icloudHmeAddressSelectAll')?.addEventListener('change', event => {
+                toggleAllIcloudHmeAddressSelection(event.target.checked);
+            });
+            document.getElementById('icloudHmeAddressPrevBtn')?.addEventListener('click', () => {
+                const nextOffset = Math.max(0, icloudHmeAddressPagination.offset - icloudHmeAddressPagination.limit);
+                loadIcloudHmeAddresses({ refresh: false, offset: nextOffset });
+            });
+            document.getElementById('icloudHmeAddressNextBtn')?.addEventListener('click', () => {
+                const nextOffset = icloudHmeAddressPagination.offset + icloudHmeAddressPagination.limit;
+                if (nextOffset < icloudHmeAddressPagination.total) {
+                    loadIcloudHmeAddresses({ refresh: false, offset: nextOffset });
+                }
+            });
             addressBody?.addEventListener('change', event => {
                 const checkbox = event.target.closest?.('.icloud-hme-address-checkbox');
                 if (checkbox) {

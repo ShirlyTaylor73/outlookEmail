@@ -372,11 +372,18 @@ def fetch_icloud_hme_list(cookie: str, region: str = 'global',
 
     hme_emails = []
     if isinstance(payload, dict):
-        for key in ('hmeEmails', 'hmeEmailList', 'emails', 'items', 'result'):
+        for key in ('hmeEmails', 'hmeEmailList', 'emails', 'items'):
             value = payload.get(key)
             if isinstance(value, list):
                 hme_emails = value
                 break
+        if not hme_emails and isinstance(payload.get('result'), dict):
+            result = payload.get('result') or {}
+            for key in ('hmeEmails', 'hmeEmailList', 'emails', 'items'):
+                value = result.get(key)
+                if isinstance(value, list):
+                    hme_emails = value
+                    break
         if not hme_emails and isinstance(payload.get('data'), dict):
             data = payload.get('data') or {}
             for key in ('hmeEmails', 'hmeEmailList', 'emails', 'items'):
