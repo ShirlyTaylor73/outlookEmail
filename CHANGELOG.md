@@ -6,6 +6,13 @@ The format is based on Keep a Changelog, and this project follows Semantic Versi
 
 ## [Unreleased]
 
+## [2.1.1] - 2026-07-12
+
+### Fixed
+- 修复外部验证码接口无法识别 OpenAI 土耳其语固定验证码邮件模板的问题，并为可信 OpenAI 发件域增加唯一 6 位数字兜底。
+- 修复 `/api/external/verification-code?refresh=1` 未对 HME 邮箱执行强制邮件同步的问题。
+- 未找到验证码时增加不包含正文或凭据的候选和提取诊断计数。
+
 ## [2.1.0] - 2026-07-12
 
 ### Added

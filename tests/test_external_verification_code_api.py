@@ -249,6 +249,86 @@ class ExternalVerificationCodeApiTests(unittest.TestCase):
         self.assertEqual(payload['source'], 'body')
         self.assertEqual(payload['checked_count'], 2)
 
+    def test_extracts_code_from_confirmed_turkish_openai_body_template(self):
+        detail_email = {
+            'subject': 'Geçici ChatGPT parola sıfırlama kodunuz',
+            'from': 'ChatGPT <noreply@tm.openai.com>',
+            'body': (
+                '<p>OpenAI</p>'
+                '<p>Devam etmek için bu<br>geçici doğrulama kodunu gir:</p>'
+                '<strong>668657</strong>'
+                '<p>ChatGPT hesabı oluşturmaya çalışan kişi sen değilsen '
+                'lütfen bu e-postayı dikkate alma.</p>'
+            ),
+        }
+
+        extraction = web_outlook_app.extract_external_verification_code(detail_email, {})
+
+        self.assertEqual(extraction, {'code': '668657', 'source': 'body'})
+
+    def test_turkish_partial_words_do_not_trigger_template_rule(self):
+        detail_email = {
+            'subject': 'Bilgilendirme',
+            'from': 'sender@example.com',
+            'body': '<p>Geçici işlem için doğrulama kaydı oluşturuldu. Referans kod 668657.</p>',
+        }
+
+        extraction = web_outlook_app.extract_external_verification_code(detail_email, {})
+
+        self.assertIsNone(extraction)
+
+    def test_trusted_openai_sender_accepts_only_one_unique_six_digit_code(self):
+        one_code = web_outlook_app.extract_external_verification_code(
+            {
+                'subject': 'ChatGPT account message 774411',
+                'from': 'ChatGPT <noreply@tm.openai.com>',
+                'body': '<p>Use the number below.</p><strong>774411</strong>',
+            },
+            {},
+        )
+        multiple_codes = web_outlook_app.extract_external_verification_code(
+            {
+                'subject': 'ChatGPT account message 774411',
+                'from': 'ChatGPT <noreply@tm.openai.com>',
+                'body': '<p>Numbers 774411 and 885522.</p>',
+            },
+            {},
+        )
+
+        self.assertEqual(one_code, {'code': '774411', 'source': 'body'})
+        self.assertIsNone(multiple_codes)
+
+    def test_openai_sender_fallback_rejects_spoofed_domain_and_keyword_miss(self):
+        spoofed = web_outlook_app.extract_external_verification_code(
+            {
+                'subject': 'ChatGPT account message',
+                'from': 'OpenAI <noreply@openai.com.evil.example>',
+                'body': '<p>Use 774411.</p>',
+            },
+            {},
+        )
+        keyword_miss = web_outlook_app.extract_external_verification_code(
+            {
+                'subject': 'ChatGPT account message',
+                'from': 'OpenAI <noreply@openai.com>',
+                'body': '<p>Use 774411.</p>',
+            },
+            {},
+            'login',
+        )
+        multiple_senders = web_outlook_app.extract_external_verification_code(
+            {
+                'subject': 'ChatGPT account message',
+                'from': 'attacker@example.com, OpenAI <noreply@openai.com>',
+                'body': '<p>Use 774411.</p>',
+            },
+            {},
+        )
+
+        self.assertIsNone(spoofed)
+        self.assertIsNone(keyword_miss)
+        self.assertIsNone(multiple_senders)
+
     def test_falls_back_to_subject_and_preview_sources(self):
         list_result = {
             'success': True,
@@ -387,6 +467,12 @@ class ExternalVerificationCodeApiTests(unittest.TestCase):
         self.assertFalse(payload['found'])
         self.assertEqual(payload['checked_count'], 2)
         self.assertFalse(payload['throttled'])
+        self.assertEqual(payload['diagnostics'], {
+            'candidate_count': 2,
+            'detail_success_count': 2,
+            'detail_failure_count': 0,
+            'extraction_miss_count': 2,
+        })
 
     def test_refresh_calls_fetch_once_then_throttles_for_30_seconds(self):
         state = getattr(web_outlook_app, 'EXTERNAL_VERIFICATION_REFRESH_STATE', None)
@@ -412,6 +498,8 @@ class ExternalVerificationCodeApiTests(unittest.TestCase):
         self.assertFalse(first.get_json()['throttled'])
         self.assertTrue(second.get_json()['throttled'])
         self.assertEqual(fetch_mock.call_count, 2)
+        self.assertTrue(fetch_mock.call_args_list[0].kwargs['force_refresh'])
+        self.assertFalse(fetch_mock.call_args_list[1].kwargs['force_refresh'])
 
     def test_uses_generic_imap_detail_for_imap_account(self):
         with self.app.app_context():

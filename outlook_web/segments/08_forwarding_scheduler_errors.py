@@ -1719,6 +1719,7 @@ EXTERNAL_VERIFICATION_CONTEXT_KEYWORDS = (
     '認證碼',
     '検証コード',
 )
+EXTERNAL_VERIFICATION_TURKISH_TEMPLATE = 'devam etmek için bu geçici doğrulama kodunu gir'
 EXTERNAL_VERIFICATION_CODE_STYLE_MARKERS = (
     'font-family: menlo',
     'font-family: monaco',
@@ -1776,6 +1777,51 @@ def external_verification_has_context(text: str) -> bool:
 def external_verification_block_has_code_style(attrs: str, content: str) -> bool:
     normalized = f'{attrs or ""} {content or ""}'.lower()
     return any(marker in normalized for marker in EXTERNAL_VERIFICATION_CODE_STYLE_MARKERS)
+
+
+def normalize_external_verification_template_text(value: str) -> str:
+    text_with_tag_boundaries = re.sub(r'<[^>]+>', ' ', str(value or ''))
+    return re.sub(r'\s+', ' ', strip_html_content(text_with_tag_boundaries)).strip().casefold()
+
+
+def find_turkish_template_external_verification_code(body_html: str) -> Optional[str]:
+    normalized = normalize_external_verification_template_text(body_html)
+    template_index = normalized.find(EXTERNAL_VERIFICATION_TURKISH_TEMPLATE)
+    if template_index < 0:
+        return None
+    code_window = normalized[
+        template_index + len(EXTERNAL_VERIFICATION_TURKISH_TEMPLATE):
+        template_index + len(EXTERNAL_VERIFICATION_TURKISH_TEMPLATE) + 200
+    ]
+    match = EXTERNAL_VERIFICATION_CODE_RE.search(code_window)
+    return match.group(0) if match else None
+
+
+def external_verification_is_trusted_openai_sender(sender: str) -> bool:
+    addresses = [
+        str(email_address or '').strip().lower()
+        for _display_name, email_address in getaddresses([str(sender or '')])
+        if str(email_address or '').strip()
+    ]
+    if len(addresses) != 1 or '@' not in addresses[0]:
+        return False
+    domain = addresses[0].rsplit('@', 1)[1]
+    return domain == 'openai.com' or domain.endswith('.openai.com')
+
+
+def find_unique_external_verification_code(sources: Dict[str, str]) -> Optional[Dict[str, str]]:
+    codes_by_source = []
+    unique_codes = set()
+    for source, text in sources.items():
+        matches = EXTERNAL_VERIFICATION_CODE_RE.findall(str(text or ''))
+        for code in matches:
+            codes_by_source.append((source, code))
+            unique_codes.add(code)
+    if len(unique_codes) != 1:
+        return None
+    code = next(iter(unique_codes))
+    source = next(source for source, matched_code in codes_by_source if matched_code == code)
+    return {'code': code, 'source': source}
 
 
 def find_contextual_external_verification_code(text: str) -> Optional[str]:
@@ -1859,6 +1905,10 @@ def extract_external_verification_code(detail_email: Dict[str, Any],
                                        list_item: Dict[str, Any],
                                        keyword: str = '') -> Optional[Dict[str, str]]:
     body_html = str(detail_email.get('body') or '')
+    turkish_template_code = find_turkish_template_external_verification_code(body_html)
+    if turkish_template_code:
+        return {'code': turkish_template_code, 'source': 'body'}
+
     html_code = find_html_external_verification_code(body_html)
     if html_code:
         return {'code': html_code, 'source': 'body'}
@@ -1887,6 +1937,9 @@ def extract_external_verification_code(detail_email: Dict[str, Any],
         code = find_contextual_external_verification_code(str(text or ''))
         if code:
             return {'code': code, 'source': source}
+    sender = detail_email.get('from') or list_item.get('from') or ''
+    if external_verification_is_trusted_openai_sender(sender):
+        return find_unique_external_verification_code(sources)
     return None
 
 
@@ -1931,7 +1984,13 @@ def api_external_verification_code():
     if refresh_requested:
         throttled = check_external_verification_refresh_throttle(account.get('email', ''), folder)
 
-    result = fetch_account_emails(account, folder, skip, top)
+    result = fetch_account_emails(
+        account,
+        folder,
+        skip,
+        top,
+        force_refresh=refresh_requested and not throttled,
+    )
     if not result.get('success'):
         return jsonify({'success': False, 'error': '获取验证码失败'}), 502
 
@@ -1941,14 +2000,20 @@ def api_external_verification_code():
     ]
 
     checked_count = 0
+    detail_success_count = 0
+    detail_failure_count = 0
+    extraction_miss_count = 0
     for item in candidates:
         detail_result = fetch_external_verification_detail(account, item, folder)
         checked_count += 1
         if not detail_result.get('success'):
+            detail_failure_count += 1
             continue
+        detail_success_count += 1
         detail_email = detail_result.get('email') or {}
         extraction = extract_external_verification_code(detail_email, item, keyword)
         if not extraction:
+            extraction_miss_count += 1
             continue
 
         message_id, item_folder, method, id_mode = normalize_external_verification_item_context(account, item, folder)
@@ -1973,6 +2038,12 @@ def api_external_verification_code():
         requested_email, account, checked_count, throttled
     )
     payload['found'] = False
+    payload['diagnostics'] = {
+        'candidate_count': len(candidates),
+        'detail_success_count': detail_success_count,
+        'detail_failure_count': detail_failure_count,
+        'extraction_miss_count': extraction_miss_count,
+    }
     return jsonify(payload)
 
 

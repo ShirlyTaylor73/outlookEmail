@@ -486,12 +486,12 @@ curl -H "X-API-Key: your-api-key" \
 | `folder` | string | 否 | `all` | `inbox`、`junkemail`、`deleteditems`、`all` |
 | `top` | int | 否 | `5` | 候选邮件数量，最大 `20` |
 | `skip` | int | 否 | `0` | 候选列表分页偏移 |
-| `refresh` | bool-like | 否 | `false` | 传 `1`、`true`、`yes`、`on` 时先刷新邮件；按 `resolved_email + folder` 30 秒节流 |
+| `refresh` | bool-like | 否 | `false` | 传 `1`、`true`、`yes`、`on` 时强制同步最新邮件；按 `resolved_email + folder` 30 秒节流，节流期间读取缓存 |
 | `subject_contains` | string | 否 | 空 | 仅检查主题包含该关键字的候选邮件，大小写不敏感 |
 | `from_contains` | string | 否 | 空 | 仅检查发件人包含该关键字的候选邮件，大小写不敏感 |
 | `keyword` | string | 否 | 空 | 要求主题、预览或正文中包含该关键字后再提取验证码 |
 
-第一版验证码规则固定为 6 位数字，并优先匹配验证码上下文附近的大字号/灰底 HTML 代码块。
+验证码规则固定为 6 位数字，并优先匹配验证码上下文附近的大字号/灰底 HTML 代码块。接口还会精确识别 OpenAI 土耳其语正文模板 `Devam etmek için bu geçici doğrulama kodunu gir:`；常规规则未命中时，仅对实际发件域为 `openai.com` 或其子域、且邮件中只有一个唯一 6 位数字的候选进行兜底。
 
 #### 请求示例
 
@@ -535,11 +535,17 @@ curl -H "X-API-Key: your-api-key" \
   "requested_email": "user@outlook.com",
   "resolved_email": "user@outlook.com",
   "checked_count": 5,
-  "throttled": false
+  "throttled": false,
+  "diagnostics": {
+    "candidate_count": 5,
+    "detail_success_count": 5,
+    "detail_failure_count": 0,
+    "extraction_miss_count": 5
+  }
 }
 ```
 
-未找到验证码不是异常，保持 HTTP `200`，便于外部项目轮询。
+未找到验证码不是异常，保持 HTTP `200`，便于外部项目轮询。`diagnostics` 只返回候选、详情读取和提取结果计数，不返回邮件正文、账号凭据或上游原始错误。
 
 #### 错误响应
 
