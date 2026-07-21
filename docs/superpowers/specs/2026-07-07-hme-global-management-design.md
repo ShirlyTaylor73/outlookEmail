@@ -400,6 +400,24 @@ HTTP 请求需要使用与现有 `fetch_icloud_hme_list()` 一致的 Cookie、Or
 
 执行结果必须逐项返回。
 
+删除执行前必须强制读取一次 Apple HME 完整列表，并以实时列表中的
+`anonymousId` 为准，不得直接使用缓存中的旧值。批次内只请求一次完整列表：
+
+- 完整列表请求失败或响应结构无效时，中止整批操作，不执行停用或删除。
+- 地址仍在实时列表中时，使用实时 `anonymousId` 依次调用停用、删除接口。
+- 地址已不在实时列表中时，不再调用 Apple action；候选记为
+  `already_absent`，缓存记为 `deleted`，项目账号停用并追加自动处理备注。
+- 完整列表刷新成功后，本地仍为 `active`、但本次未返回的缓存地址先记为
+  `missing`；只有删除流程完成本地收尾后才记为 `deleted`。
+- 实时列表仍包含地址、但 Apple action 返回 `-41003` 时继续记为 `failed`，
+  不将该错误无条件视为“已删除”。
+
+批量结果返回 `deleted_count`、`already_absent_count`、`error_count`，逐项状态为
+`deleted`、`already_absent` 或 `failed`。
+
+候选列表提供“全选/取消全选”，范围仅限当前加载的 `pending` 和 `failed`
+候选；已完成状态不可选择。批量删除按钮显示当前已选数量且无选择时禁用。
+
 ## 数据库设计
 
 新增表由 `init_db()` 创建，并通过 `ALTER TABLE` 兼容已有数据库。
@@ -624,4 +642,3 @@ python -m compileall web_outlook_app.py outlook_web
 - 多进程/分布式任务队列。
 - HME 删除后物理删除本地账号。
 - 对 Apple HME API 的登录密码认证流程。
-

@@ -248,7 +248,13 @@ class ICloudHmeDeactivationTestCase(unittest.TestCase):
             calls.append(('delete', anonymous_id))
             return {'success': True}
 
-        with patch.object(web_outlook_app, 'deactivate_icloud_hme', side_effect=fake_deactivate), \
+        realtime_list = {
+            'success': True,
+            'list_complete': True,
+            'hmeEmails': [{'hme': hme, 'anonymousId': 'anon-delete', 'isActive': True}],
+        }
+        with patch.object(web_outlook_app, 'fetch_icloud_hme_list', return_value=realtime_list), \
+                patch.object(web_outlook_app, 'deactivate_icloud_hme', side_effect=fake_deactivate), \
                 patch.object(web_outlook_app, 'delete_icloud_hme', side_effect=fake_delete):
             response = self.client.post(
                 '/api/icloud-hme/deactivation-candidates/delete',
@@ -298,7 +304,16 @@ class ICloudHmeDeactivationTestCase(unittest.TestCase):
                 return {'success': False, 'error': 'delete failed'}
             return {'success': True}
 
-        with patch.object(web_outlook_app, 'deactivate_icloud_hme', return_value={'success': True}), \
+        realtime_list = {
+            'success': True,
+            'list_complete': True,
+            'hmeEmails': [
+                {'hme': success_hme, 'anonymousId': 'anon-success', 'isActive': True},
+                {'hme': failed_hme, 'anonymousId': 'anon-failed', 'isActive': True},
+            ],
+        }
+        with patch.object(web_outlook_app, 'fetch_icloud_hme_list', return_value=realtime_list), \
+                patch.object(web_outlook_app, 'deactivate_icloud_hme', return_value={'success': True}), \
                 patch.object(web_outlook_app, 'delete_icloud_hme', side_effect=fake_delete):
             response = self.client.post(
                 '/api/icloud-hme/deactivation-candidates/delete',
@@ -327,6 +342,145 @@ class ICloudHmeDeactivationTestCase(unittest.TestCase):
         self.assertEqual(status_by_id[success_candidate_id], 'deleted')
         self.assertEqual(status_by_id[failed_candidate_id], 'failed')
         self.assertIn('delete failed', error_by_id[failed_candidate_id])
+
+    def test_delete_candidates_uses_one_realtime_list_and_latest_anonymous_id(self):
+        with self.app.app_context():
+            source_id = self._create_source()
+            group_id = self._create_group()
+            first_hme = 'first@icloud.com'
+            second_hme = 'second@icloud.com'
+            first_account_id = self._create_hme_account(source_id, group_id, first_hme)
+            second_account_id = self._create_hme_account(source_id, group_id, second_hme)
+            self._cache_hme_address(source_id, first_hme, 'stale-first')
+            self._cache_hme_address(source_id, second_hme, 'stale-second')
+            first_id = self._create_candidate(source_id, first_account_id, first_hme)
+            second_id = self._create_candidate(source_id, second_account_id, second_hme)
+
+        realtime_list = {
+            'success': True,
+            'list_complete': True,
+            'hmeEmails': [
+                {'hme': first_hme, 'anonymousId': 'fresh-first', 'isActive': True},
+                {'hme': second_hme, 'anonymousId': 'fresh-second', 'isActive': True},
+            ],
+        }
+        calls = []
+
+        def record_action(_cookie, _region, _host, anonymous_id):
+            calls.append(anonymous_id)
+            return {'success': True}
+
+        with patch.object(web_outlook_app, 'fetch_icloud_hme_list', return_value=realtime_list) as fetch_mock, \
+                patch.object(web_outlook_app, 'deactivate_icloud_hme', side_effect=record_action), \
+                patch.object(web_outlook_app, 'delete_icloud_hme', side_effect=record_action):
+            response = self.client.post(
+                '/api/icloud-hme/deactivation-candidates/delete',
+                json={'source_id': source_id, 'candidate_ids': [first_id, second_id]},
+            )
+
+        data = response.get_json()
+        self.assertEqual(response.status_code, 200, msg=data)
+        self.assertEqual(fetch_mock.call_count, 1)
+        self.assertEqual(calls, ['fresh-first', 'fresh-first', 'fresh-second', 'fresh-second'])
+
+    def test_delete_candidate_already_absent_finishes_locally_without_apple_actions(self):
+        with self.app.app_context():
+            source_id = self._create_source()
+            group_id = self._create_group()
+            hme = 'already-gone@icloud.com'
+            account_id = self._create_hme_account(source_id, group_id, hme, remark='before')
+            self._cache_hme_address(source_id, hme, 'stale-anonymous-id')
+            candidate_id = self._create_candidate(source_id, account_id, hme)
+
+        realtime_list = {'success': True, 'list_complete': True, 'hmeEmails': []}
+        with patch.object(web_outlook_app, 'fetch_icloud_hme_list', return_value=realtime_list), \
+                patch.object(web_outlook_app, 'deactivate_icloud_hme') as deactivate_mock, \
+                patch.object(web_outlook_app, 'delete_icloud_hme') as delete_mock:
+            response = self.client.post(
+                '/api/icloud-hme/deactivation-candidates/delete',
+                json={'source_id': source_id, 'candidate_ids': [candidate_id]},
+            )
+
+        data = response.get_json()
+        self.assertEqual(response.status_code, 200, msg=data)
+        self.assertEqual(data['already_absent_count'], 1)
+        self.assertEqual(data['error_count'], 0)
+        self.assertEqual(data['results'][0]['state'], 'already_absent')
+        deactivate_mock.assert_not_called()
+        delete_mock.assert_not_called()
+        with self.app.app_context():
+            db = web_outlook_app.get_db()
+            candidate = db.execute(
+                'SELECT status, last_error, deleted_at FROM icloud_hme_deactivation_candidates WHERE id = ?',
+                (candidate_id,),
+            ).fetchone()
+            cache = db.execute(
+                'SELECT status FROM icloud_hme_address_cache WHERE source_id = ? AND hme = ?',
+                (source_id, hme),
+            ).fetchone()
+            account = db.execute('SELECT status, remark FROM accounts WHERE id = ?', (account_id,)).fetchone()
+        self.assertEqual(candidate['status'], 'already_absent')
+        self.assertEqual(candidate['last_error'], '')
+        self.assertIsNotNone(candidate['deleted_at'])
+        self.assertEqual(cache['status'], 'deleted')
+        self.assertEqual(account['status'], 'inactive')
+        self.assertIn('HME deleted at', account['remark'])
+
+    def test_delete_candidates_stops_when_realtime_list_fails(self):
+        with self.app.app_context():
+            source_id = self._create_source()
+            group_id = self._create_group()
+            hme = 'keep-safe@icloud.com'
+            account_id = self._create_hme_account(source_id, group_id, hme)
+            self._cache_hme_address(source_id, hme, 'stale-id')
+            candidate_id = self._create_candidate(source_id, account_id, hme)
+
+        with patch.object(web_outlook_app, 'fetch_icloud_hme_list', return_value={
+            'success': False,
+            'error': 'list unavailable',
+        }), patch.object(web_outlook_app, 'deactivate_icloud_hme') as deactivate_mock, \
+                patch.object(web_outlook_app, 'delete_icloud_hme') as delete_mock:
+            response = self.client.post(
+                '/api/icloud-hme/deactivation-candidates/delete',
+                json={'source_id': source_id, 'candidate_ids': [candidate_id]},
+            )
+
+        data = response.get_json()
+        self.assertEqual(response.status_code, 502, msg=data)
+        self.assertFalse(data['success'])
+        self.assertIn('list unavailable', data['error'])
+        deactivate_mock.assert_not_called()
+        delete_mock.assert_not_called()
+
+    def test_realtime_present_minus_41003_stays_failed(self):
+        with self.app.app_context():
+            source_id = self._create_source()
+            group_id = self._create_group()
+            hme = 'still-listed@icloud.com'
+            account_id = self._create_hme_account(source_id, group_id, hme)
+            self._cache_hme_address(source_id, hme, 'stale-id')
+            candidate_id = self._create_candidate(source_id, account_id, hme)
+
+        realtime_list = {
+            'success': True,
+            'list_complete': True,
+            'hmeEmails': [{'hme': hme, 'anonymousId': 'fresh-id', 'isActive': True}],
+        }
+        with patch.object(web_outlook_app, 'fetch_icloud_hme_list', return_value=realtime_list), \
+                patch.object(web_outlook_app, 'deactivate_icloud_hme', return_value={
+                    'success': False,
+                    'error': 'Invalid private email in request (errorCode -41003, retryAfter 2s)',
+                }), patch.object(web_outlook_app, 'delete_icloud_hme') as delete_mock:
+            response = self.client.post(
+                '/api/icloud-hme/deactivation-candidates/delete',
+                json={'source_id': source_id, 'candidate_ids': [candidate_id]},
+            )
+
+        data = response.get_json()
+        self.assertEqual(response.status_code, 200, msg=data)
+        self.assertEqual(data['results'][0]['state'], 'failed')
+        self.assertIn('-41003', data['results'][0]['error'])
+        delete_mock.assert_not_called()
 
 
 if __name__ == '__main__':

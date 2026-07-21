@@ -325,6 +325,77 @@ class ICloudHmeAddressManagementTestCase(unittest.TestCase):
         self.assertIn("params.set('group_id', filters.group_id)", settings_js)
         self.assertIn('renderIcloudHmeAddressPagination()', settings_js)
 
+    def test_complete_refresh_marks_missing_cache_and_exposes_candidate_select_all(self):
+        source_id = self._create_source()
+        with self.app.app_context():
+            db = web_outlook_app.get_db()
+            db.execute(
+                '''
+                INSERT INTO icloud_hme_address_cache (
+                    source_id, hme, label, note, status, anonymous_id, last_seen_at, updated_at
+                ) VALUES (?, 'missing@icloud.com', '', '', 'active', 'stale-id', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                ''',
+                (source_id,),
+            )
+            db.commit()
+
+        with patch.object(web_outlook_app, 'fetch_icloud_hme_list', return_value={
+            'success': True,
+            'list_complete': True,
+            'hmeEmails': [{'hme': 'current@icloud.com', 'anonymousId': 'current-id', 'isActive': True}],
+        }):
+            response = self.client.get(
+                f'/api/icloud-hme/addresses?source_id={source_id}&refresh=1&active=all'
+            )
+
+        self.assertEqual(response.status_code, 200, msg=response.get_data(as_text=True))
+        with self.app.app_context():
+            row = web_outlook_app.get_db().execute(
+                'SELECT status FROM icloud_hme_address_cache WHERE source_id = ? AND hme = ?',
+                (source_id, 'missing@icloud.com'),
+            ).fetchone()
+        self.assertEqual(row['status'], 'missing')
+
+        template = TEMPLATE_PATH.read_text(encoding='utf-8')
+        settings_js = SETTINGS_JS_PATH.read_text(encoding='utf-8')
+        self.assertIn('id="icloudHmeCandidateSelectAllBtn"', template)
+        self.assertIn('icloudHmeSelectedCandidateIds', settings_js)
+        self.assertIn('toggleAllIcloudHmeCandidateSelection', settings_js)
+        self.assertIn('批量删除 (', settings_js)
+
+    def test_incomplete_refresh_does_not_mark_cached_addresses_missing(self):
+        source_id = self._create_source()
+        with self.app.app_context():
+            db = web_outlook_app.get_db()
+            db.execute(
+                '''
+                INSERT INTO icloud_hme_address_cache (
+                    source_id, hme, label, note, status, anonymous_id, last_seen_at, updated_at
+                ) VALUES (?, 'preserved@icloud.com', '', '', 'active', 'preserved-id', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                ''',
+                (source_id,),
+            )
+            db.commit()
+
+        with patch.object(web_outlook_app, 'fetch_icloud_hme_list', return_value={
+            'success': True,
+            'list_complete': False,
+            'hmeEmails': [],
+        }):
+            response = self.client.get(
+                f'/api/icloud-hme/addresses?source_id={source_id}&refresh=1&active=all'
+            )
+
+        data = response.get_json()
+        self.assertEqual(response.status_code, 200, msg=data)
+        self.assertIn('缺少完整地址列表', data['refresh_error'])
+        with self.app.app_context():
+            row = web_outlook_app.get_db().execute(
+                'SELECT status FROM icloud_hme_address_cache WHERE source_id = ? AND hme = ?',
+                (source_id, 'preserved@icloud.com'),
+            ).fetchone()
+        self.assertEqual(row['status'], 'active')
+
     def test_settings_supports_fullscreen_and_keeps_hme_table_scroll_local(self):
         template = TEMPLATE_PATH.read_text(encoding='utf-8')
         settings_js = SETTINGS_JS_PATH.read_text(encoding='utf-8')

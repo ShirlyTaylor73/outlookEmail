@@ -139,7 +139,7 @@ def extract_hme_item_fields(item) -> Dict[str, Any]:
     }
 
 
-def upsert_icloud_hme_address_cache(source_id, hme_items) -> None:
+def upsert_icloud_hme_address_cache(source_id, hme_items, reconcile_missing=False) -> None:
     db = get_db()
     rows = []
     seen = set()
@@ -159,28 +159,50 @@ def upsert_icloud_hme_address_cache(source_id, hme_items) -> None:
             fields.get('icloud_created_at'),
         ))
 
-    if not rows:
-        return
-
-    db.executemany(
-        '''
-        INSERT INTO icloud_hme_address_cache (
-            source_id, hme, label, note, status, anonymous_id, icloud_created_at,
-            last_seen_at, updated_at
+    if reconcile_missing:
+        db.execute(
+            '''
+            UPDATE icloud_hme_address_cache
+            SET status = 'missing', updated_at = CURRENT_TIMESTAMP
+            WHERE source_id = ? AND status = 'active'
+            ''',
+            (int(source_id),),
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-        ON CONFLICT(source_id, hme) DO UPDATE SET
-            label = excluded.label,
-            note = excluded.note,
-            status = excluded.status,
-            anonymous_id = excluded.anonymous_id,
-            icloud_created_at = COALESCE(excluded.icloud_created_at, icloud_hme_address_cache.icloud_created_at),
-            last_seen_at = CURRENT_TIMESTAMP,
-            updated_at = CURRENT_TIMESTAMP
-        ''',
-        rows,
-    )
+
+    if rows:
+        db.executemany(
+            '''
+            INSERT INTO icloud_hme_address_cache (
+                source_id, hme, label, note, status, anonymous_id, icloud_created_at,
+                last_seen_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+            ON CONFLICT(source_id, hme) DO UPDATE SET
+                label = excluded.label,
+                note = excluded.note,
+                status = excluded.status,
+                anonymous_id = excluded.anonymous_id,
+                icloud_created_at = COALESCE(excluded.icloud_created_at, icloud_hme_address_cache.icloud_created_at),
+                last_seen_at = CURRENT_TIMESTAMP,
+                updated_at = CURRENT_TIMESTAMP
+            ''',
+            rows,
+        )
     db.commit()
+
+
+def is_complete_icloud_hme_list_result(result) -> bool:
+    return bool(result.get('success')) and result.get('list_complete', True) is not False
+
+
+def build_icloud_hme_realtime_index(hme_items) -> Dict[str, Dict[str, Any]]:
+    realtime_index = {}
+    for item in hme_items or []:
+        fields = extract_hme_item_fields(item)
+        hme = fields.get('hme') or ''
+        if hme:
+            realtime_index[hme] = fields
+    return realtime_index
 
 
 def load_cached_icloud_hme_addresses(source_id) -> List[Dict[str, Any]]:
@@ -282,8 +304,14 @@ def list_icloud_hme_addresses(source_id, filters) -> Dict[str, Any]:
         )
         if not result.get('success'):
             refresh_error = sanitize_error_details(str(result.get('error') or '刷新 iCloud HME 列表失败'))
+        elif not is_complete_icloud_hme_list_result(result):
+            refresh_error = '刷新 iCloud HME 列表失败：响应中缺少完整地址列表'
         else:
-            upsert_icloud_hme_address_cache(source_id, result.get('hmeEmails') or [])
+            upsert_icloud_hme_address_cache(
+                source_id,
+                result.get('hmeEmails') or [],
+                reconcile_missing=True,
+            )
 
     items = load_cached_icloud_hme_addresses(source_id)
     status_map = build_icloud_hme_import_status_map(source_id, [item['hme'] for item in items])
@@ -851,8 +879,12 @@ def refresh_icloud_hme_address_cache_if_needed(source, refresh=False):
         source.get('region') or 'global',
         source.get('maildomain_host') or '',
     )
-    if result.get('success'):
-        upsert_icloud_hme_address_cache(source['id'], result.get('hmeEmails') or [])
+    if is_complete_icloud_hme_list_result(result):
+        upsert_icloud_hme_address_cache(
+            source['id'],
+            result.get('hmeEmails') or [],
+            reconcile_missing=True,
+        )
 
 
 def scan_icloud_hme_deactivation_candidates(
@@ -928,7 +960,8 @@ def scan_icloud_hme_deactivation_candidates(
                 account_id = excluded.account_id,
                 reason = excluded.reason,
                 status = CASE
-                    WHEN icloud_hme_deactivation_candidates.status = 'deleted' THEN 'deleted'
+                    WHEN icloud_hme_deactivation_candidates.status IN ('deleted', 'already_absent')
+                        THEN icloud_hme_deactivation_candidates.status
                     ELSE 'pending'
                 END,
                 updated_at = CURRENT_TIMESTAMP
@@ -1019,17 +1052,44 @@ def append_hme_deleted_remark(remark: str) -> str:
     return f'{current}\n{marker}'.strip() if current else marker
 
 
-def find_icloud_hme_anonymous_id(source_id, hme) -> str:
-    row = get_db().execute(
+def finalize_icloud_hme_candidate_locally(db, row, candidate_status):
+    candidate_id = int(row['id'])
+    hme = row['hme']
+    db.execute(
         '''
-        SELECT anonymous_id
-        FROM icloud_hme_address_cache
-        WHERE source_id = ? AND LOWER(hme) = LOWER(?)
-        LIMIT 1
+        UPDATE icloud_hme_deactivation_candidates
+        SET status = ?, deleted_at = COALESCE(deleted_at, CURRENT_TIMESTAMP),
+            last_error = '', updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?
         ''',
-        (source_id, hme),
-    ).fetchone()
-    return (row['anonymous_id'] or '').strip() if row else ''
+        (candidate_status, candidate_id),
+    )
+    db.execute(
+        '''
+        INSERT INTO icloud_hme_address_cache (
+            source_id, hme, label, note, status, anonymous_id, updated_at
+        )
+        VALUES (?, ?, '', '', 'deleted', '', CURRENT_TIMESTAMP)
+        ON CONFLICT(source_id, hme) DO UPDATE SET
+            status = 'deleted', updated_at = CURRENT_TIMESTAMP
+        ''',
+        (int(row['source_id']), hme),
+    )
+    account_id = row['account_id']
+    if account_id:
+        account_row = db.execute(
+            'SELECT remark FROM accounts WHERE id = ?',
+            (account_id,),
+        ).fetchone()
+        db.execute(
+            '''
+            UPDATE accounts
+            SET status = 'inactive', remark = ?, updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            ''',
+            (append_hme_deleted_remark(account_row['remark'] if account_row else ''), account_id),
+        )
+    db.commit()
 
 
 def delete_icloud_hme_deactivation_candidates(source_id, candidate_ids):
@@ -1062,14 +1122,33 @@ def delete_icloud_hme_deactivation_candidates(source_id, candidate_ids):
     if missing_ids:
         raise LookupError('候选项不存在')
 
-    if any(not find_icloud_hme_anonymous_id(source_id, row['hme']) for row in rows):
-        refresh_icloud_hme_address_cache_if_needed(source, refresh=True)
+    list_result = fetch_icloud_hme_list(
+        source.get('cookie') or '',
+        source.get('region') or 'global',
+        source.get('maildomain_host') or '',
+    )
+    if not list_result.get('success'):
+        raise RuntimeError(sanitize_error_details(
+            str(list_result.get('error') or '刷新 iCloud HME 列表失败')
+        ))
+    if not is_complete_icloud_hme_list_result(list_result):
+        raise RuntimeError('刷新 iCloud HME 列表失败：响应中缺少完整地址列表')
+
+    realtime_items = list_result.get('hmeEmails') or []
+    realtime_index = build_icloud_hme_realtime_index(realtime_items)
+    upsert_icloud_hme_address_cache(source_id, realtime_items, reconcile_missing=True)
 
     results = []
     for row in rows:
         candidate_id = int(row['id'])
-        hme = row['hme']
-        anonymous_id = find_icloud_hme_anonymous_id(source_id, hme)
+        hme = normalize_hme_address(row['hme'])
+        realtime_item = realtime_index.get(hme)
+        if not realtime_item:
+            finalize_icloud_hme_candidate_locally(db, row, 'already_absent')
+            results.append({'id': candidate_id, 'hme': hme, 'state': 'already_absent'})
+            continue
+
+        anonymous_id = str(realtime_item.get('anonymous_id') or '').strip()
         if not anonymous_id:
             error_message = '未找到 HME anonymousId，无法删除'
             db.execute(
@@ -1120,38 +1199,7 @@ def delete_icloud_hme_deactivation_candidates(source_id, candidate_ids):
             ):
                 raise RuntimeError(delete_result.get('error') or '删除 HME 地址失败')
 
-            db.execute(
-                '''
-                UPDATE icloud_hme_deactivation_candidates
-                SET status = 'deleted', deleted_at = COALESCE(deleted_at, CURRENT_TIMESTAMP),
-                    last_error = '', updated_at = CURRENT_TIMESTAMP
-                WHERE id = ?
-                ''',
-                (candidate_id,),
-            )
-            db.execute(
-                '''
-                UPDATE icloud_hme_address_cache
-                SET status = 'deleted', updated_at = CURRENT_TIMESTAMP
-                WHERE source_id = ? AND LOWER(hme) = LOWER(?)
-                ''',
-                (source_id, hme),
-            )
-            account_id = row['account_id']
-            if account_id:
-                account_row = db.execute(
-                    'SELECT remark FROM accounts WHERE id = ?',
-                    (account_id,),
-                ).fetchone()
-                db.execute(
-                    '''
-                    UPDATE accounts
-                    SET status = 'inactive', remark = ?, updated_at = CURRENT_TIMESTAMP
-                    WHERE id = ?
-                    ''',
-                    (append_hme_deleted_remark(account_row['remark'] if account_row else ''), account_id),
-                )
-            db.commit()
+            finalize_icloud_hme_candidate_locally(db, row, 'deleted')
             results.append({'id': candidate_id, 'hme': hme, 'state': 'deleted'})
         except Exception as exc:
             error_message = sanitize_error_details(str(exc))[:500]
@@ -1171,6 +1219,7 @@ def delete_icloud_hme_deactivation_candidates(source_id, candidate_ids):
         'source_id': source_id,
         'results': results,
         'deleted_count': sum(1 for item in results if item.get('state') == 'deleted'),
+        'already_absent_count': sum(1 for item in results if item.get('state') == 'already_absent'),
         'error_count': sum(1 for item in results if item.get('state') == 'failed'),
     }
 
@@ -1375,5 +1424,7 @@ def api_delete_icloud_hme_deactivation_candidates():
         return jsonify({'success': False, 'error': str(exc)}), 404
     except ValueError as exc:
         return jsonify({'success': False, 'error': str(exc)}), 400
+    except RuntimeError as exc:
+        return jsonify({'success': False, 'error': sanitize_error_details(str(exc))}), 502
     except Exception:
         return jsonify({'success': False, 'error': '删除 HME 停用候选失败'}), 500

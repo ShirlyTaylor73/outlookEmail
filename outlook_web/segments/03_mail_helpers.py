@@ -371,30 +371,39 @@ def fetch_icloud_hme_list(cookie: str, region: str = 'global',
         }
 
     hme_emails = []
+    list_complete = False
     if isinstance(payload, dict):
         for key in ('hmeEmails', 'hmeEmailList', 'emails', 'items'):
             value = payload.get(key)
             if isinstance(value, list):
                 hme_emails = value
+                list_complete = True
                 break
-        if not hme_emails and isinstance(payload.get('result'), dict):
+        if not list_complete and isinstance(payload.get('result'), dict):
             result = payload.get('result') or {}
             for key in ('hmeEmails', 'hmeEmailList', 'emails', 'items'):
                 value = result.get(key)
                 if isinstance(value, list):
                     hme_emails = value
+                    list_complete = True
                     break
-        if not hme_emails and isinstance(payload.get('data'), dict):
+        if not list_complete and isinstance(payload.get('data'), dict):
             data = payload.get('data') or {}
             for key in ('hmeEmails', 'hmeEmailList', 'emails', 'items'):
                 value = data.get(key)
                 if isinstance(value, list):
                     hme_emails = value
+                    list_complete = True
                     break
     elif isinstance(payload, list):
         hme_emails = payload
+        list_complete = True
 
-    return {'success': True, 'hmeEmails': hme_emails}
+    return {
+        'success': True,
+        'hmeEmails': hme_emails,
+        'list_complete': list_complete,
+    }
 
 
 GRAPH_DEFAULT_TOKEN_SCOPE = "https://graph.microsoft.com/.default"
