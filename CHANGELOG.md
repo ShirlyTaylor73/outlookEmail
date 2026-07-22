@@ -6,6 +6,15 @@ The format is based on Keep a Changelog, and this project follows Semantic Versi
 
 ## [Unreleased]
 
+## [2.1.2] - 2026-07-22
+
+### Added
+- OpenAI Access Deactivated 候选列表增加“全选/取消全选”和已选数量，仅批量选择待处理及失败项。
+
+### Fixed
+- HME 批量停用删除改为在每个批次开始时读取 Apple 实时完整列表，并使用最新 `anonymousId`，避免陈旧缓存触发 `-41003 Invalid private email`。
+- Apple 实时列表已不存在的 HME 地址会完成本地停用收尾；完整刷新会区分 `missing` 与 `deleted`，异常或不完整响应不会误标记缓存。
+
 ## [2.1.1] - 2026-07-12
 
 ### Fixed
