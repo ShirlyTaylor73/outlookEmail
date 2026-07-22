@@ -6,6 +6,17 @@ The format is based on Keep a Changelog, and this project follows Semantic Versi
 
 ## [Unreleased]
 
+## [2.1.3] - 2026-07-22
+
+### Changed
+- OpenAI Access Deactivated 扫描改为先读取 Apple HME 实时列表，仅查询仍处于 active 状态的地址，并复用本地收件人索引，避免触发 IMAP 同步、读取正文或全量更新 HME 缓存。
+- HME 停用候选列表默认仅保留待处理和失败工作项；成功删除或确认远端不存在后会物理删除候选记录。
+
+### Fixed
+- 修复旧邮件可能为 inactive、已删除或远端不存在的 HME 地址重复创建停用候选的问题。
+- 修复停用成功但删除失败的 inactive 候选无法继续重试的问题，重试时会跳过停用步骤并直接删除。
+- 增加 v2.1.2 候选数据迁移，并在扫描与批量删除期间禁用重复操作、显示中文处理状态。
+
 ## [2.1.2] - 2026-07-22
 
 ### Added
