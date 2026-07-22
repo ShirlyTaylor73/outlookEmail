@@ -11,6 +11,7 @@
         let icloudHmeLongRunnerStatus = null;
         let icloudHmeDeactivationCandidates = [];
         let icloudHmeSelectedCandidateIds = new Set();
+        let icloudHmeCandidateActionBusy = false;
         let icloudHmeGroupsCache = [];
         let icloudHmeLongRunnerPollTimer = null;
         let icloudHmeSettingsEventsBound = false;
@@ -19,6 +20,11 @@
         let normalMailRetentionStatusPollDelayMs = 0;
         const NORMAL_MAIL_RETENTION_STATUS_INITIAL_POLL_MS = 2000;
         const NORMAL_MAIL_RETENTION_STATUS_MAX_POLL_MS = 10000;
+        const ICLOUD_HME_CANDIDATE_STATUS_LABELS = {
+            pending: '待处理',
+            failed: '处理失败',
+            processing: '处理中'
+        };
 
         function parseSettingsBoolean(value) {
             return String(value).toLowerCase() === 'true';
@@ -1432,17 +1438,18 @@
                 group_id: document.getElementById('icloudHmeAddressGroupFilter')?.value || '',
                 folder: 'all',
                 subject_contains: 'OpenAI - Access Deactivated',
-                limit: 200,
-                refresh: false
+                limit: 200
             };
         }
 
         async function scanIcloudHmeDeactivationCandidates() {
+            if (icloudHmeCandidateActionBusy) return;
             const payload = getIcloudHmeDeactivationScanPayload();
             if (!payload.source_id) {
                 showToast('请先选择 HME 源', 'error');
                 return;
             }
+            setIcloudHmeCandidateActionBusy(true);
             try {
                 const response = await fetch('/api/icloud-hme/deactivation-candidates/scan', {
                     method: 'POST',
@@ -1454,10 +1461,14 @@
                     handleApiError(data, '扫描 HME 停用候选失败');
                     return;
                 }
-                showToast(`扫描完成：发现 ${Number(data.candidate_count || 0)} 个候选`, 'success');
+                const removedCount = Number(data.removed_stale_count || 0);
+                const removedText = removedCount ? `，清理 ${removedCount} 个无效候选` : '';
+                showToast(`扫描完成：发现 ${Number(data.candidate_count || 0)} 个候选${removedText}`, 'success');
                 await loadIcloudHmeDeactivationCandidates();
             } catch (error) {
                 showToast('扫描 HME 停用候选失败', 'error');
+            } finally {
+                setIcloudHmeCandidateActionBusy(false);
             }
         }
 
@@ -1495,6 +1506,22 @@
                 .filter(Number.isFinite);
         }
 
+        function setIcloudHmeCandidateActionBusy(busy) {
+            icloudHmeCandidateActionBusy = !!busy;
+            const candidateById = new Map(
+                icloudHmeDeactivationCandidates.map(candidate => [Number(candidate.id), candidate])
+            );
+            document.querySelectorAll('.icloud-hme-candidate-checkbox').forEach(checkbox => {
+                const candidate = candidateById.get(Number(checkbox.dataset.id));
+                checkbox.disabled = icloudHmeCandidateActionBusy || !isIcloudHmeCandidateActionable(candidate);
+            });
+            document.querySelectorAll('[data-action="delete-candidate"]').forEach(button => {
+                const candidate = candidateById.get(Number(button.dataset.id));
+                button.disabled = icloudHmeCandidateActionBusy || !isIcloudHmeCandidateActionable(candidate);
+            });
+            syncIcloudHmeCandidateSelectionControls();
+        }
+
         function syncIcloudHmeCandidateSelectionControls() {
             const actionableIds = getActionableIcloudHmeCandidateIds();
             const actionableSet = new Set(actionableIds);
@@ -1508,15 +1535,17 @@
             const selectAllBtn = document.getElementById('icloudHmeCandidateSelectAllBtn');
             if (selectAllBtn) {
                 selectAllBtn.textContent = allSelected ? '取消全选' : '全选';
-                selectAllBtn.disabled = actionableIds.length === 0;
+                selectAllBtn.disabled = icloudHmeCandidateActionBusy || actionableIds.length === 0;
                 selectAllBtn.setAttribute('aria-pressed', allSelected ? 'true' : 'false');
             }
 
             const deleteBtn = document.getElementById('icloudHmeDeleteCandidatesBtn');
             if (deleteBtn) {
                 deleteBtn.textContent = `批量删除 (${selectedCount})`;
-                deleteBtn.disabled = selectedCount === 0;
+                deleteBtn.disabled = icloudHmeCandidateActionBusy || selectedCount === 0;
             }
+            const scanBtn = document.getElementById('icloudHmeScanCandidatesBtn');
+            if (scanBtn) scanBtn.disabled = icloudHmeCandidateActionBusy;
         }
 
         function toggleAllIcloudHmeCandidateSelection() {
@@ -1550,13 +1579,15 @@
                 Array.from(icloudHmeSelectedCandidateIds).filter(id => visibleActionableIds.has(id))
             );
             bodyEl.innerHTML = candidates.map(candidate => {
+                const candidateStatus = String(candidate.status || 'pending').toLowerCase();
+                const statusLabel = ICLOUD_HME_CANDIDATE_STATUS_LABELS[candidateStatus] || candidateStatus;
                 const statusText = candidate.error
-                    ? `${candidate.status || 'error'}：${candidate.error}`
-                    : (candidate.status || 'pending');
+                    ? `${statusLabel}：${candidate.error}`
+                    : statusLabel;
                 const candidateId = Number(candidate.id);
                 const actionable = isIcloudHmeCandidateActionable(candidate);
                 const checked = actionable && icloudHmeSelectedCandidateIds.has(candidateId) ? 'checked' : '';
-                const disabled = actionable ? '' : 'disabled';
+                const disabled = actionable && !icloudHmeCandidateActionBusy ? '' : 'disabled';
                 return `
                     <tr>
                         <td>
@@ -1582,6 +1613,7 @@
         }
 
         async function deleteSelectedIcloudHmeCandidates() {
+            if (icloudHmeCandidateActionBusy) return;
             const sourceId = getSelectedIcloudHmeSourceId();
             const actionableIds = new Set(getActionableIcloudHmeCandidateIds());
             const ids = Array.from(icloudHmeSelectedCandidateIds).filter(id => actionableIds.has(id));
@@ -1599,6 +1631,7 @@
             );
             if (!confirmed) return;
 
+            setIcloudHmeCandidateActionBusy(true);
             try {
                 const response = await fetch('/api/icloud-hme/deactivation-candidates/delete', {
                     method: 'POST',
@@ -1628,6 +1661,8 @@
                 }
             } catch (error) {
                 showToast('删除 HME 停用候选失败', 'error');
+            } finally {
+                setIcloudHmeCandidateActionBusy(false);
             }
         }
 

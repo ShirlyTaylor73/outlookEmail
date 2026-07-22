@@ -400,23 +400,33 @@ HTTP 请求需要使用与现有 `fetch_icloud_hme_list()` 一致的 Cookie、Or
 
 执行结果必须逐项返回。
 
-删除执行前必须强制读取一次 Apple HME 完整列表，并以实时列表中的
-`anonymousId` 为准，不得直接使用缓存中的旧值。批次内只请求一次完整列表：
+扫描和删除执行前必须分别读取一次 Apple HME 完整列表，并以实时状态及
+`anonymousId` 为准，不得直接使用缓存中的旧值：
+
+- 扫描只查询 Apple 实时 `isActive=true` 地址对应的本地邮件索引，不触发
+  IMAP 同步、不读取正文，也不为 inactive、missing、deleted 或远端不存在的
+  地址创建候选。
+- 候选表只保存 `pending`、`failed` 和请求执行中的 `processing` 工作项；成功或
+  确认远端不存在后物理删除候选记录。
+- 停用成功但删除失败的地址即使已经 inactive，仍以 `failed` 保留以供重试；
+  重试时直接调用 delete，不再重复调用 deactivate。
+- 每次扫描会清理旧版本遗留的非 active pending 候选和远端已不存在的失败候选。
 
 - 完整列表请求失败或响应结构无效时，中止整批操作，不执行停用或删除。
 - 地址仍在实时列表中时，使用实时 `anonymousId` 依次调用停用、删除接口。
 - 地址已不在实时列表中时，不再调用 Apple action；候选记为
-  `already_absent`，缓存记为 `deleted`，项目账号停用并追加自动处理备注。
+  已完成，缓存记为 `deleted`，项目账号停用并追加自动处理备注，随后删除候选。
 - 完整列表刷新成功后，本地仍为 `active`、但本次未返回的缓存地址先记为
   `missing`；只有删除流程完成本地收尾后才记为 `deleted`。
 - 实时列表仍包含地址、但 Apple action 返回 `-41003` 时继续记为 `failed`，
   不将该错误无条件视为“已删除”。
 
-批量结果返回 `deleted_count`、`already_absent_count`、`error_count`，逐项状态为
-`deleted`、`already_absent` 或 `failed`。
+批量结果继续返回 `deleted_count`、`already_absent_count`、`error_count`，逐项状态为
+`deleted`、`already_absent` 或 `failed`，但终态不再持久化到候选表。
 
 候选列表提供“全选/取消全选”，范围仅限当前加载的 `pending` 和 `failed`
 候选；已完成状态不可选择。批量删除按钮显示当前已选数量且无选择时禁用。
+扫描和删除请求执行期间禁用候选操作，避免重复提交。
 
 ## 数据库设计
 

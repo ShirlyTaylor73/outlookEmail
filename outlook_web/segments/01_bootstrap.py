@@ -1037,6 +1037,26 @@ def migrate_icloud_hme_management_columns(conn) -> None:
     }
     if candidate_columns and 'deleted_at' not in candidate_columns:
         conn.execute('ALTER TABLE icloud_hme_deactivation_candidates ADD COLUMN deleted_at TIMESTAMP')
+    if candidate_columns:
+        conn.execute(
+            """
+            DELETE FROM icloud_hme_deactivation_candidates
+            WHERE status IN ('deleted', 'already_absent')
+            """
+        )
+        conn.execute(
+            """
+            UPDATE icloud_hme_deactivation_candidates
+            SET status = 'failed',
+                last_error = CASE
+                    WHEN COALESCE(last_error, '') = ''
+                        THEN 'interrupted HME deletion; retry required'
+                    ELSE last_error
+                END,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE status IN ('deactivated', 'processing')
+            """
+        )
 
 
 def ensure_icloud_hme_management_runtime_columns(db=None) -> None:

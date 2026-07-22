@@ -362,6 +362,10 @@ class ICloudHmeAddressManagementTestCase(unittest.TestCase):
         self.assertIn('icloudHmeSelectedCandidateIds', settings_js)
         self.assertIn('toggleAllIcloudHmeCandidateSelection', settings_js)
         self.assertIn('批量删除 (', settings_js)
+        self.assertIn('icloudHmeCandidateActionBusy', settings_js)
+        self.assertIn('setIcloudHmeCandidateActionBusy', settings_js)
+        self.assertIn("pending: '待处理'", settings_js)
+        self.assertIn("failed: '处理失败'", settings_js)
 
     def test_incomplete_refresh_does_not_mark_cached_addresses_missing(self):
         source_id = self._create_source()

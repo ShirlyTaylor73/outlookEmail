@@ -871,20 +871,135 @@ def request_stop_icloud_hme_generation_task(task_id=None):
     )
 
 
-def refresh_icloud_hme_address_cache_if_needed(source, refresh=False):
-    if not refresh:
-        return
+def fetch_icloud_hme_realtime_index(source):
     result = fetch_icloud_hme_list(
         source.get('cookie') or '',
         source.get('region') or 'global',
         source.get('maildomain_host') or '',
     )
-    if is_complete_icloud_hme_list_result(result):
-        upsert_icloud_hme_address_cache(
-            source['id'],
-            result.get('hmeEmails') or [],
-            reconcile_missing=True,
+    if not result.get('success'):
+        raise RuntimeError(sanitize_error_details(
+            str(result.get('error') or '刷新 iCloud HME 列表失败')
+        ))
+    if not is_complete_icloud_hme_list_result(result):
+        raise RuntimeError('刷新 iCloud HME 列表失败：响应中缺少完整地址列表')
+    return build_icloud_hme_realtime_index(result.get('hmeEmails') or [])
+
+
+def finalize_icloud_hme_address_locally(db, row):
+    hme = normalize_hme_address(row['hme'])
+    db.execute(
+        '''
+        INSERT INTO icloud_hme_address_cache (
+            source_id, hme, label, note, status, anonymous_id, updated_at
         )
+        VALUES (?, ?, '', '', 'deleted', '', CURRENT_TIMESTAMP)
+        ON CONFLICT(source_id, hme) DO UPDATE SET
+            status = 'deleted', updated_at = CURRENT_TIMESTAMP
+        ''',
+        (int(row['source_id']), hme),
+    )
+    account_id = row['account_id']
+    if account_id:
+        account_row = db.execute(
+            'SELECT remark FROM accounts WHERE id = ?',
+            (account_id,),
+        ).fetchone()
+        db.execute(
+            '''
+            UPDATE accounts
+            SET status = 'inactive', remark = ?, updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            ''',
+            (append_hme_deleted_remark(account_row['remark'] if account_row else ''), account_id),
+        )
+
+
+def cleanup_icloud_hme_deactivation_candidates(db, source_id, realtime_index, active_hmes):
+    rows = db.execute(
+        '''
+        SELECT *
+        FROM icloud_hme_deactivation_candidates
+        WHERE source_id = ?
+        ''',
+        (int(source_id),),
+    ).fetchall()
+    removed_count = 0
+    for row in rows:
+        status = str(row['status'] or 'pending').strip().lower()
+        hme = normalize_hme_address(row['hme'])
+        should_remove = status in {'deleted', 'already_absent'}
+        if status == 'pending' and hme not in active_hmes:
+            should_remove = True
+        elif status == 'failed' and hme not in realtime_index:
+            finalize_icloud_hme_address_locally(db, row)
+            should_remove = True
+
+        if should_remove:
+            db.execute(
+                'DELETE FROM icloud_hme_deactivation_candidates WHERE id = ?',
+                (int(row['id']),),
+            )
+            removed_count += 1
+    db.commit()
+    return removed_count
+
+
+def query_active_icloud_hme_deactivation_messages(
+    source_id,
+    active_hmes,
+    group_id=None,
+    folder='all',
+    subject_prefix='OpenAI - Access Deactivated',
+    limit=200,
+):
+    if not active_hmes:
+        return []
+
+    folder_name = str(folder or 'all').strip().lower()
+    normalized_limit = normalize_int_arg(limit, 200, 1, 5000)
+    db = get_db()
+    matched_rows = []
+    folder_clause = 'AND m.folder = ?' if folder_name != 'all' else ''
+    group_clause = 'AND a.group_id = ?' if group_id not in (None, '') else ''
+    for address_chunk in chunk_account_ids(sorted(active_hmes), chunk_size=400):
+        placeholders = ','.join('?' * len(address_chunk))
+        params = [int(source_id), f'{str(subject_prefix or "").strip()}%']
+        if folder_clause:
+            params.append(folder_name)
+        if group_clause:
+            params.append(int(group_id))
+        params.extend(address_chunk)
+
+        rows = db.execute(
+            f'''
+            SELECT r.hme_address AS hme, MAX(m.subject) AS subject,
+                   MIN(m.received_at) AS received_at, MAX(m.received_at_sort) AS latest_sort,
+                   MIN(a.id) AS account_id, MIN(a.group_id) AS group_id,
+                   MIN(g.name) AS group_name
+            FROM icloud_hme_source_message_recipients r
+            JOIN icloud_hme_source_messages m ON m.id = r.source_message_id
+            LEFT JOIN accounts a
+              ON a.email = r.hme_address COLLATE NOCASE
+             AND a.account_type = 'icloud_hme'
+             AND a.icloud_hme_source_id = r.source_id
+            LEFT JOIN groups g ON g.id = a.group_id
+            WHERE r.source_id = ?
+              AND m.subject LIKE ?
+              {folder_clause}
+              {group_clause}
+              AND r.hme_address IN ({placeholders})
+            GROUP BY r.hme_address
+            ''',
+            tuple(params),
+        ).fetchall()
+        matched_rows.extend(rows)
+
+    matched_rows.sort(
+        key=lambda row: (float(row['latest_sort'] or 0), normalize_hme_address(row['hme'])),
+        reverse=True,
+    )
+    return matched_rows[:normalized_limit]
 
 
 def scan_icloud_hme_deactivation_candidates(
@@ -896,53 +1011,36 @@ def scan_icloud_hme_deactivation_candidates(
     refresh=False,
 ):
     source_id = normalize_source_id(source_id)
-    source = get_icloud_hme_source_by_id(source_id, include_secret=bool(refresh))
+    source = get_icloud_hme_source_by_id(source_id, include_secret=True)
     if not source:
         raise LookupError('iCloud HME 接收源不存在')
-    refresh_icloud_hme_address_cache_if_needed(source, refresh=refresh)
-
-    params = [source_id, f"%{str(subject_contains or '').strip()}%"]
-    folder_clause = ''
-    if str(folder or 'all').lower() != 'all':
-        folder_clause = 'AND m.folder = ?'
-        params.append(str(folder).strip())
-
-    group_clause = ''
     if group_id not in (None, ''):
         group_error = validate_account_target_group_id(group_id)
         if group_error:
             raise ValueError(group_error)
-        group_clause = 'AND a.group_id = ?'
-        params.append(int(group_id))
 
-    params.append(normalize_int_arg(limit, 200, 1, 5000))
+    realtime_index = fetch_icloud_hme_realtime_index(source)
+    active_index = {
+        hme: item
+        for hme, item in realtime_index.items()
+        if bool(item.get('is_active'))
+    }
+
     db = get_db()
-    rows = db.execute(
-        f'''
-        SELECT LOWER(r.hme_address) AS hme, MIN(m.subject) AS subject,
-               MIN(m.received_at) AS received_at, MIN(a.id) AS account_id,
-               MIN(a.group_id) AS group_id, MIN(g.name) AS group_name,
-               MIN(cache.anonymous_id) AS anonymous_id
-        FROM icloud_hme_source_messages m
-        JOIN icloud_hme_source_message_recipients r ON r.source_message_id = m.id
-        LEFT JOIN accounts a
-          ON LOWER(a.email) = LOWER(r.hme_address)
-         AND a.account_type = 'icloud_hme'
-         AND a.icloud_hme_source_id = m.source_id
-        LEFT JOIN groups g ON g.id = a.group_id
-        LEFT JOIN icloud_hme_address_cache cache
-          ON cache.source_id = m.source_id
-         AND LOWER(cache.hme) = LOWER(r.hme_address)
-        WHERE m.source_id = ?
-          AND m.subject LIKE ?
-          {folder_clause}
-          {group_clause}
-        GROUP BY LOWER(r.hme_address)
-        ORDER BY MAX(m.received_at_sort) DESC, hme ASC
-        LIMIT ?
-        ''',
-        tuple(params),
-    ).fetchall()
+    removed_stale_count = cleanup_icloud_hme_deactivation_candidates(
+        db,
+        source_id,
+        realtime_index,
+        set(active_index),
+    )
+    rows = query_active_icloud_hme_deactivation_messages(
+        source_id,
+        set(active_index),
+        group_id=group_id,
+        folder=folder,
+        subject_prefix=subject_contains,
+        limit=limit,
+    )
 
     candidates = []
     for row in rows:
@@ -959,22 +1057,34 @@ def scan_icloud_hme_deactivation_candidates(
             ON CONFLICT(source_id, hme) DO UPDATE SET
                 account_id = excluded.account_id,
                 reason = excluded.reason,
-                status = CASE
-                    WHEN icloud_hme_deactivation_candidates.status IN ('deleted', 'already_absent')
-                        THEN icloud_hme_deactivation_candidates.status
-                    ELSE 'pending'
-                END,
                 updated_at = CURRENT_TIMESTAMP
+            WHERE COALESCE(icloud_hme_deactivation_candidates.account_id, 0)
+                    != COALESCE(excluded.account_id, 0)
+               OR COALESCE(icloud_hme_deactivation_candidates.reason, '')
+                    != COALESCE(excluded.reason, '')
             ''',
             (source_id, hme, row['account_id'], reason),
         )
+        candidate_row = db.execute(
+            '''
+            SELECT id, status, last_error
+            FROM icloud_hme_deactivation_candidates
+            WHERE source_id = ? AND hme = ?
+            ''',
+            (source_id, hme),
+        ).fetchone()
+        if str(candidate_row['status'] or '').lower() not in {'pending', 'failed'}:
+            continue
         candidates.append({
+            'id': int(candidate_row['id']),
             'hme': hme,
             'account_id': row['account_id'],
             'group_id': row['group_id'],
             'group_name': row['group_name'] or '',
-            'anonymous_id': row['anonymous_id'] or '',
+            'anonymous_id': active_index.get(hme, {}).get('anonymous_id') or '',
             'reason': reason,
+            'status': candidate_row['status'] or 'pending',
+            'error': candidate_row['last_error'] or '',
         })
     db.commit()
 
@@ -983,6 +1093,8 @@ def scan_icloud_hme_deactivation_candidates(
         'source_id': source_id,
         'scanned_count': len(rows),
         'candidate_count': len(candidates),
+        'active_address_count': len(active_index),
+        'removed_stale_count': removed_stale_count,
         'candidates': candidates,
     }
 
@@ -993,7 +1105,7 @@ def list_icloud_hme_deactivation_candidates(source_id, status=None, limit=200):
         raise LookupError('iCloud HME 接收源不存在')
 
     params = [source_id]
-    status_clause = ''
+    status_clause = "AND c.status IN ('pending', 'failed')"
     if status:
         status_clause = 'AND c.status = ?'
         params.append(str(status).strip())
@@ -1045,51 +1157,12 @@ def hme_api_result_is_success_or_already_done(result, keywords):
 
 
 def append_hme_deleted_remark(remark: str) -> str:
-    marker = f'HME deleted at {datetime.utcnow().isoformat(timespec="seconds")}Z'
+    deleted_at = datetime.now(timezone.utc).isoformat(timespec='seconds').replace('+00:00', 'Z')
+    marker = f'HME deleted at {deleted_at}'
     current = str(remark or '').strip()
     if marker in current:
         return current
     return f'{current}\n{marker}'.strip() if current else marker
-
-
-def finalize_icloud_hme_candidate_locally(db, row, candidate_status):
-    candidate_id = int(row['id'])
-    hme = row['hme']
-    db.execute(
-        '''
-        UPDATE icloud_hme_deactivation_candidates
-        SET status = ?, deleted_at = COALESCE(deleted_at, CURRENT_TIMESTAMP),
-            last_error = '', updated_at = CURRENT_TIMESTAMP
-        WHERE id = ?
-        ''',
-        (candidate_status, candidate_id),
-    )
-    db.execute(
-        '''
-        INSERT INTO icloud_hme_address_cache (
-            source_id, hme, label, note, status, anonymous_id, updated_at
-        )
-        VALUES (?, ?, '', '', 'deleted', '', CURRENT_TIMESTAMP)
-        ON CONFLICT(source_id, hme) DO UPDATE SET
-            status = 'deleted', updated_at = CURRENT_TIMESTAMP
-        ''',
-        (int(row['source_id']), hme),
-    )
-    account_id = row['account_id']
-    if account_id:
-        account_row = db.execute(
-            'SELECT remark FROM accounts WHERE id = ?',
-            (account_id,),
-        ).fetchone()
-        db.execute(
-            '''
-            UPDATE accounts
-            SET status = 'inactive', remark = ?, updated_at = CURRENT_TIMESTAMP
-            WHERE id = ?
-            ''',
-            (append_hme_deleted_remark(account_row['remark'] if account_row else ''), account_id),
-        )
-    db.commit()
 
 
 def delete_icloud_hme_deactivation_candidates(source_id, candidate_ids):
@@ -1113,6 +1186,7 @@ def delete_icloud_hme_deactivation_candidates(source_id, candidate_ids):
         SELECT *
         FROM icloud_hme_deactivation_candidates
         WHERE source_id = ? AND id IN ({placeholders})
+          AND status IN ('pending', 'failed')
         ORDER BY id ASC
         ''',
         tuple([source_id] + normalized_ids),
@@ -1120,23 +1194,9 @@ def delete_icloud_hme_deactivation_candidates(source_id, candidate_ids):
     found_ids = {int(row['id']) for row in rows}
     missing_ids = [candidate_id for candidate_id in normalized_ids if candidate_id not in found_ids]
     if missing_ids:
-        raise LookupError('候选项不存在')
+        raise LookupError('候选项不存在或当前状态不可处理')
 
-    list_result = fetch_icloud_hme_list(
-        source.get('cookie') or '',
-        source.get('region') or 'global',
-        source.get('maildomain_host') or '',
-    )
-    if not list_result.get('success'):
-        raise RuntimeError(sanitize_error_details(
-            str(list_result.get('error') or '刷新 iCloud HME 列表失败')
-        ))
-    if not is_complete_icloud_hme_list_result(list_result):
-        raise RuntimeError('刷新 iCloud HME 列表失败：响应中缺少完整地址列表')
-
-    realtime_items = list_result.get('hmeEmails') or []
-    realtime_index = build_icloud_hme_realtime_index(realtime_items)
-    upsert_icloud_hme_address_cache(source_id, realtime_items, reconcile_missing=True)
+    realtime_index = fetch_icloud_hme_realtime_index(source)
 
     results = []
     for row in rows:
@@ -1144,7 +1204,12 @@ def delete_icloud_hme_deactivation_candidates(source_id, candidate_ids):
         hme = normalize_hme_address(row['hme'])
         realtime_item = realtime_index.get(hme)
         if not realtime_item:
-            finalize_icloud_hme_candidate_locally(db, row, 'already_absent')
+            finalize_icloud_hme_address_locally(db, row)
+            db.execute(
+                'DELETE FROM icloud_hme_deactivation_candidates WHERE id = ?',
+                (candidate_id,),
+            )
+            db.commit()
             results.append({'id': candidate_id, 'hme': hme, 'state': 'already_absent'})
             continue
 
@@ -1163,29 +1228,29 @@ def delete_icloud_hme_deactivation_candidates(source_id, candidate_ids):
             results.append({'id': candidate_id, 'hme': hme, 'state': 'failed', 'error': error_message})
             continue
 
-        try:
-            deactivate_result = deactivate_icloud_hme(
-                source.get('cookie') or '',
-                source.get('region') or 'global',
-                source.get('maildomain_host') or '',
-                anonymous_id,
-            )
-            if not hme_api_result_is_success_or_already_done(
-                deactivate_result,
-                {'already', 'deactivated', 'inactive', 'disabled', 'not active', '已停用', '不存在'},
-            ):
-                raise RuntimeError(deactivate_result.get('error') or '停用 HME 地址失败')
+        db.execute(
+            '''
+            UPDATE icloud_hme_deactivation_candidates
+            SET status = 'processing', last_error = '', updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            ''',
+            (candidate_id,),
+        )
+        db.commit()
 
-            db.execute(
-                '''
-                UPDATE icloud_hme_deactivation_candidates
-                SET status = 'deactivated', deactivated_at = COALESCE(deactivated_at, CURRENT_TIMESTAMP),
-                    last_error = '', updated_at = CURRENT_TIMESTAMP
-                WHERE id = ?
-                ''',
-                (candidate_id,),
-            )
-            db.commit()
+        try:
+            if bool(realtime_item.get('is_active')):
+                deactivate_result = deactivate_icloud_hme(
+                    source.get('cookie') or '',
+                    source.get('region') or 'global',
+                    source.get('maildomain_host') or '',
+                    anonymous_id,
+                )
+                if not hme_api_result_is_success_or_already_done(
+                    deactivate_result,
+                    {'already', 'deactivated', 'inactive', 'disabled', 'not active', '已停用', '不存在'},
+                ):
+                    raise RuntimeError(deactivate_result.get('error') or '停用 HME 地址失败')
 
             delete_result = delete_icloud_hme(
                 source.get('cookie') or '',
@@ -1199,7 +1264,12 @@ def delete_icloud_hme_deactivation_candidates(source_id, candidate_ids):
             ):
                 raise RuntimeError(delete_result.get('error') or '删除 HME 地址失败')
 
-            finalize_icloud_hme_candidate_locally(db, row, 'deleted')
+            finalize_icloud_hme_address_locally(db, row)
+            db.execute(
+                'DELETE FROM icloud_hme_deactivation_candidates WHERE id = ?',
+                (candidate_id,),
+            )
+            db.commit()
             results.append({'id': candidate_id, 'hme': hme, 'state': 'deleted'})
         except Exception as exc:
             error_message = sanitize_error_details(str(exc))[:500]
@@ -1386,6 +1456,8 @@ def api_scan_icloud_hme_deactivation_candidates():
         return jsonify({'success': False, 'error': str(exc)}), 404
     except ValueError as exc:
         return jsonify({'success': False, 'error': str(exc)}), 400
+    except RuntimeError as exc:
+        return jsonify({'success': False, 'error': sanitize_error_details(str(exc))}), 502
     except Exception:
         return jsonify({'success': False, 'error': '扫描 HME 停用候选失败'}), 500
 

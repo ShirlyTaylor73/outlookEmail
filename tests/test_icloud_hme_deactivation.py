@@ -140,16 +140,24 @@ class ICloudHmeDeactivationTestCase(unittest.TestCase):
         db.commit()
         return message_id
 
-    def _create_candidate(self, source_id, account_id, hme, reason='OpenAI - Access Deactivated'):
+    def _create_candidate(
+        self,
+        source_id,
+        account_id,
+        hme,
+        reason='OpenAI - Access Deactivated',
+        status='pending',
+        last_error='',
+    ):
         db = web_outlook_app.get_db()
         cursor = db.execute(
             '''
             INSERT INTO icloud_hme_deactivation_candidates (
-                source_id, hme, account_id, reason, status
+                source_id, hme, account_id, reason, status, last_error
             )
-            VALUES (?, ?, ?, ?, 'pending')
+            VALUES (?, ?, ?, ?, ?, ?)
             ''',
-            (source_id, hme, account_id, reason),
+            (source_id, hme, account_id, reason, status, last_error),
         )
         db.commit()
         return int(cursor.lastrowid)
@@ -160,17 +168,25 @@ class ICloudHmeDeactivationTestCase(unittest.TestCase):
             group_id = self._create_group()
             hme = 'openai-hme@icloud.com'
             account_id = self._create_hme_account(source_id, group_id, hme)
-            self._cache_hme_address(source_id, hme, 'anon-openai')
+            self._cache_hme_address(source_id, hme, 'stale-anon-openai')
             self._create_source_message(
                 source_id,
                 hme,
                 'OpenAI - Access Deactivated [C-5GiU3pJbeSBF]',
             )
 
-        response = self.client.post(
-            '/api/icloud-hme/deactivation-candidates/scan',
-            json={'source_id': source_id},
-        )
+        realtime_list = {
+            'success': True,
+            'list_complete': True,
+            'hmeEmails': [{'hme': hme, 'anonymousId': 'fresh-anon-openai', 'isActive': True}],
+        }
+        with patch.object(web_outlook_app, 'fetch_icloud_hme_list', return_value=realtime_list) as fetch_mock, \
+                patch.object(web_outlook_app, 'sync_icloud_hme_source_messages') as sync_mock, \
+                patch.object(web_outlook_app, 'upsert_icloud_hme_address_cache') as cache_upsert_mock:
+            response = self.client.post(
+                '/api/icloud-hme/deactivation-candidates/scan',
+                json={'source_id': source_id},
+            )
 
         data = response.get_json()
         self.assertEqual(response.status_code, 200, msg=data)
@@ -181,7 +197,10 @@ class ICloudHmeDeactivationTestCase(unittest.TestCase):
         self.assertEqual(candidate['hme'], hme)
         self.assertEqual(candidate['account_id'], account_id)
         self.assertEqual(candidate['group_id'], group_id)
-        self.assertEqual(candidate['anonymous_id'], 'anon-openai')
+        self.assertEqual(candidate['anonymous_id'], 'fresh-anon-openai')
+        self.assertEqual(fetch_mock.call_count, 1)
+        sync_mock.assert_not_called()
+        cache_upsert_mock.assert_not_called()
         with self.app.app_context():
             row = web_outlook_app.get_db().execute(
                 '''
@@ -213,10 +232,19 @@ class ICloudHmeDeactivationTestCase(unittest.TestCase):
                 'OpenAI - Access Deactivated [other-group]',
             )
 
-        response = self.client.post(
-            '/api/icloud-hme/deactivation-candidates/scan',
-            json={'source_id': source_id, 'group_id': target_group_id},
-        )
+        realtime_list = {
+            'success': True,
+            'list_complete': True,
+            'hmeEmails': [
+                {'hme': target_hme, 'anonymousId': 'anon-target', 'isActive': True},
+                {'hme': other_hme, 'anonymousId': 'anon-other', 'isActive': True},
+            ],
+        }
+        with patch.object(web_outlook_app, 'fetch_icloud_hme_list', return_value=realtime_list):
+            response = self.client.post(
+                '/api/icloud-hme/deactivation-candidates/scan',
+                json={'source_id': source_id, 'group_id': target_group_id},
+            )
 
         data = response.get_json()
         self.assertEqual(response.status_code, 200, msg=data)
@@ -226,6 +254,123 @@ class ICloudHmeDeactivationTestCase(unittest.TestCase):
         with self.app.app_context():
             count = web_outlook_app.get_db().execute(
                 'SELECT COUNT(*) AS total FROM icloud_hme_deactivation_candidates'
+            ).fetchone()['total']
+        self.assertEqual(count, 0)
+
+    def test_scan_only_creates_active_candidates_and_cleans_stale_rows(self):
+        with self.app.app_context():
+            source_id = self._create_source()
+            group_id = self._create_group()
+            active_hme = 'active@icloud.com'
+            inactive_hme = 'inactive@icloud.com'
+            absent_hme = 'absent@icloud.com'
+            active_account_id = self._create_hme_account(source_id, group_id, active_hme)
+            inactive_account_id = self._create_hme_account(source_id, group_id, inactive_hme)
+            absent_account_id = self._create_hme_account(source_id, group_id, absent_hme)
+            for hme in (active_hme, inactive_hme, absent_hme):
+                self._create_source_message(
+                    source_id,
+                    hme,
+                    f'OpenAI - Access Deactivated [{hme}]',
+                )
+            stale_pending_id = self._create_candidate(source_id, inactive_account_id, inactive_hme)
+            stale_terminal_id = self._create_candidate(
+                source_id,
+                absent_account_id,
+                absent_hme,
+                status='already_absent',
+            )
+
+        realtime_list = {
+            'success': True,
+            'list_complete': True,
+            'hmeEmails': [
+                {'hme': active_hme, 'anonymousId': 'active-id', 'isActive': True},
+                {'hme': inactive_hme, 'anonymousId': 'inactive-id', 'isActive': False},
+            ],
+        }
+        with patch.object(web_outlook_app, 'fetch_icloud_hme_list', return_value=realtime_list):
+            response = self.client.post(
+                '/api/icloud-hme/deactivation-candidates/scan',
+                json={'source_id': source_id},
+            )
+
+        data = response.get_json()
+        self.assertEqual(response.status_code, 200, msg=data)
+        self.assertEqual(data['candidate_count'], 1)
+        self.assertEqual(data['candidates'][0]['hme'], active_hme)
+        self.assertEqual(data['removed_stale_count'], 2)
+        with self.app.app_context():
+            rows = web_outlook_app.get_db().execute(
+                'SELECT id, hme, status FROM icloud_hme_deactivation_candidates WHERE source_id = ?',
+                (source_id,),
+            ).fetchall()
+        self.assertEqual([(row['hme'], row['status']) for row in rows], [(active_hme, 'pending')])
+        self.assertNotIn(stale_pending_id, [int(row['id']) for row in rows])
+        self.assertNotIn(stale_terminal_id, [int(row['id']) for row in rows])
+
+    def test_scan_preserves_failed_inactive_candidate_without_resetting_status(self):
+        with self.app.app_context():
+            source_id = self._create_source()
+            group_id = self._create_group()
+            hme = 'retry-delete@icloud.com'
+            account_id = self._create_hme_account(source_id, group_id, hme)
+            self._create_source_message(source_id, hme, 'OpenAI - Access Deactivated [retry]')
+            candidate_id = self._create_candidate(
+                source_id,
+                account_id,
+                hme,
+                status='failed',
+                last_error='delete failed',
+            )
+
+        realtime_list = {
+            'success': True,
+            'list_complete': True,
+            'hmeEmails': [{'hme': hme, 'anonymousId': 'retry-id', 'isActive': False}],
+        }
+        with patch.object(web_outlook_app, 'fetch_icloud_hme_list', return_value=realtime_list):
+            response = self.client.post(
+                '/api/icloud-hme/deactivation-candidates/scan',
+                json={'source_id': source_id},
+            )
+
+        data = response.get_json()
+        self.assertEqual(response.status_code, 200, msg=data)
+        self.assertEqual(data['candidate_count'], 0)
+        with self.app.app_context():
+            row = web_outlook_app.get_db().execute(
+                'SELECT status, last_error FROM icloud_hme_deactivation_candidates WHERE id = ?',
+                (candidate_id,),
+            ).fetchone()
+        self.assertEqual(row['status'], 'failed')
+        self.assertEqual(row['last_error'], 'delete failed')
+
+    def test_scan_stops_when_realtime_list_fails(self):
+        with self.app.app_context():
+            source_id = self._create_source()
+            group_id = self._create_group()
+            hme = 'safe-scan@icloud.com'
+            self._create_hme_account(source_id, group_id, hme)
+            self._create_source_message(source_id, hme, 'OpenAI - Access Deactivated [safe]')
+
+        with patch.object(web_outlook_app, 'fetch_icloud_hme_list', return_value={
+            'success': False,
+            'error': 'list unavailable',
+        }):
+            response = self.client.post(
+                '/api/icloud-hme/deactivation-candidates/scan',
+                json={'source_id': source_id},
+            )
+
+        data = response.get_json()
+        self.assertEqual(response.status_code, 502, msg=data)
+        self.assertFalse(data['success'])
+        self.assertIn('list unavailable', data['error'])
+        with self.app.app_context():
+            count = web_outlook_app.get_db().execute(
+                'SELECT COUNT(*) AS total FROM icloud_hme_deactivation_candidates WHERE source_id = ?',
+                (source_id,),
             ).fetchone()['total']
         self.assertEqual(count, 0)
 
@@ -280,9 +425,7 @@ class ICloudHmeDeactivationTestCase(unittest.TestCase):
                 'SELECT status, remark FROM accounts WHERE id = ?',
                 (account_id,),
             ).fetchone()
-        self.assertEqual(candidate['status'], 'deleted')
-        self.assertEqual(candidate['last_error'], '')
-        self.assertIsNotNone(candidate['deleted_at'])
+        self.assertIsNone(candidate)
         self.assertEqual(account['status'], 'inactive')
         self.assertIn('HME deleted at', account['remark'])
 
@@ -339,7 +482,7 @@ class ICloudHmeDeactivationTestCase(unittest.TestCase):
             ).fetchall()
         status_by_id = {int(row['id']): row['status'] for row in rows}
         error_by_id = {int(row['id']): row['last_error'] for row in rows}
-        self.assertEqual(status_by_id[success_candidate_id], 'deleted')
+        self.assertNotIn(success_candidate_id, status_by_id)
         self.assertEqual(status_by_id[failed_candidate_id], 'failed')
         self.assertIn('delete failed', error_by_id[failed_candidate_id])
 
@@ -419,9 +562,7 @@ class ICloudHmeDeactivationTestCase(unittest.TestCase):
                 (source_id, hme),
             ).fetchone()
             account = db.execute('SELECT status, remark FROM accounts WHERE id = ?', (account_id,)).fetchone()
-        self.assertEqual(candidate['status'], 'already_absent')
-        self.assertEqual(candidate['last_error'], '')
-        self.assertIsNotNone(candidate['deleted_at'])
+        self.assertIsNone(candidate)
         self.assertEqual(cache['status'], 'deleted')
         self.assertEqual(account['status'], 'inactive')
         self.assertIn('HME deleted at', account['remark'])
@@ -481,6 +622,65 @@ class ICloudHmeDeactivationTestCase(unittest.TestCase):
         self.assertEqual(data['results'][0]['state'], 'failed')
         self.assertIn('-41003', data['results'][0]['error'])
         delete_mock.assert_not_called()
+
+    def test_delete_inactive_failed_candidate_skips_deactivate_and_removes_candidate(self):
+        with self.app.app_context():
+            source_id = self._create_source()
+            group_id = self._create_group()
+            hme = 'inactive-retry@icloud.com'
+            account_id = self._create_hme_account(source_id, group_id, hme)
+            candidate_id = self._create_candidate(
+                source_id,
+                account_id,
+                hme,
+                status='failed',
+                last_error='previous delete failed',
+            )
+
+        realtime_list = {
+            'success': True,
+            'list_complete': True,
+            'hmeEmails': [{'hme': hme, 'anonymousId': 'inactive-id', 'isActive': False}],
+        }
+        with patch.object(web_outlook_app, 'fetch_icloud_hme_list', return_value=realtime_list), \
+                patch.object(web_outlook_app, 'deactivate_icloud_hme') as deactivate_mock, \
+                patch.object(web_outlook_app, 'delete_icloud_hme', return_value={'success': True}) as delete_mock:
+            response = self.client.post(
+                '/api/icloud-hme/deactivation-candidates/delete',
+                json={'source_id': source_id, 'candidate_ids': [candidate_id]},
+            )
+
+        data = response.get_json()
+        self.assertEqual(response.status_code, 200, msg=data)
+        self.assertEqual(data['deleted_count'], 1)
+        deactivate_mock.assert_not_called()
+        delete_mock.assert_called_once_with('cookie=value', 'global', 'maildomain.icloud.com', 'inactive-id')
+        with self.app.app_context():
+            row = web_outlook_app.get_db().execute(
+                'SELECT id FROM icloud_hme_deactivation_candidates WHERE id = ?',
+                (candidate_id,),
+            ).fetchone()
+        self.assertIsNone(row)
+
+    def test_candidate_list_defaults_to_pending_and_failed_only(self):
+        with self.app.app_context():
+            source_id = self._create_source()
+            group_id = self._create_group()
+            for status in ('pending', 'failed', 'deleted', 'already_absent', 'processing'):
+                hme = f'{status}@icloud.com'
+                account_id = self._create_hme_account(source_id, group_id, hme)
+                self._create_candidate(source_id, account_id, hme, status=status)
+
+        response = self.client.get(
+            f'/api/icloud-hme/deactivation-candidates?source_id={source_id}&limit=200'
+        )
+
+        data = response.get_json()
+        self.assertEqual(response.status_code, 200, msg=data)
+        self.assertEqual(
+            {candidate['status'] for candidate in data['candidates']},
+            {'pending', 'failed'},
+        )
 
 
 if __name__ == '__main__':

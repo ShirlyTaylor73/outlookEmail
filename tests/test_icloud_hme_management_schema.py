@@ -88,3 +88,53 @@ def test_reset_interrupted_icloud_hme_generation_tasks_marks_incomplete_tasks_st
     assert all(row["stopped_at"] for row in interrupted_rows)
     assert completed_row["status"] == "completed"
     assert completed_row["stop_requested"] == 0
+
+
+def test_hme_candidate_migration_removes_terminal_and_recovers_interrupted_rows(client):
+    db = app_module.get_db()
+    db.execute(
+        '''
+        INSERT INTO icloud_hme_sources (name, region, receiver_email)
+        VALUES ('Migration Source', 'global', 'migration@example.com')
+        '''
+    )
+    source_id = int(db.execute(
+        "SELECT id FROM icloud_hme_sources WHERE name = 'Migration Source'"
+    ).fetchone()['id'])
+    db.executemany(
+        '''
+        INSERT INTO icloud_hme_deactivation_candidates (
+            source_id, hme, status, last_error
+        ) VALUES (?, ?, ?, '')
+        ''',
+        [
+            (source_id, 'deleted@icloud.com', 'deleted'),
+            (source_id, 'absent@icloud.com', 'already_absent'),
+            (source_id, 'deactivated@icloud.com', 'deactivated'),
+            (source_id, 'processing@icloud.com', 'processing'),
+            (source_id, 'pending@icloud.com', 'pending'),
+        ],
+    )
+    db.commit()
+
+    app_module.ensure_icloud_hme_management_runtime_columns(db)
+
+    rows = db.execute(
+        '''
+        SELECT hme, status, last_error
+        FROM icloud_hme_deactivation_candidates
+        WHERE source_id = ?
+        ORDER BY hme
+        ''',
+        (source_id,),
+    ).fetchall()
+    rows_by_hme = {row['hme']: row for row in rows}
+    assert set(rows_by_hme) == {
+        'deactivated@icloud.com',
+        'pending@icloud.com',
+        'processing@icloud.com',
+    }
+    assert rows_by_hme['deactivated@icloud.com']['status'] == 'failed'
+    assert rows_by_hme['processing@icloud.com']['status'] == 'failed'
+    assert 'interrupted' in rows_by_hme['processing@icloud.com']['last_error']
+    assert rows_by_hme['pending@icloud.com']['status'] == 'pending'
